@@ -4,10 +4,10 @@
 -- HKDF (RFC 5869) and @expand_message_xmd@ (RFC 9380, section 5.3.1) are
 -- not primitives: each is a few lines of concatenation and calls to a hash
 -- or a MAC. They are written here, over 'hmacSha512' and 'sha512', because
--- libsodium 1.0.18, the oldest this package supports (the one the build
--- machines' distribution packages), has neither: @crypto_kdf_hkdf_sha512_*@
+-- libsodium 1.0.18, the oldest this package supports and the version
+-- Debian 12 and Ubuntu 24.04 ship, has neither: @crypto_kdf_hkdf_sha512_*@
 -- came in 1.0.19, and libsodium has no @expand_message_xmd@ with SHA-512.
--- The tests check both against published known-answer vectors: RFC 9380's
+-- The tests check both against known answers: RFC 9380's
 -- appendix K.3 for @expand_message_xmd@, and HKDF-SHA-512 outputs computed
 -- independently with OpenSSL (through Node's @crypto.hkdfSync@).
 module Crypto.OPAQUE.Kdf
