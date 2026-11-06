@@ -1,0 +1,67 @@
+cabal-version:      3.0
+name:               opaque
+version:            0.1.0.0
+synopsis:           OPAQUE (RFC 9807), the augmented PAKE, over libsodium
+description:
+  OPAQUE, the augmented password-authenticated key exchange of RFC 9807,
+  with its OPRF from RFC 9497, for the suite ristretto255, SHA-512 and the
+  3DH key exchange, with a key stretching function chosen by the
+  application (Argon2id, or none for the RFC's test vectors). The protocol
+  is written in Haskell; every primitive (ristretto255, SHA-512,
+  HMAC-SHA-512, Argon2id, random numbers) comes from libsodium. It builds
+  natively and for GHC's WebAssembly backend, with a libsodium built for
+  wasm32-wasi.
+license:            MIT
+license-file:       LICENSE
+author:             Mateusz Goślinowski
+maintainer:         mateusz.goslinowski@gmail.com
+category:           Cryptography
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+                    README.md
+tested-with:        GHC == 9.10.3, GHC == 9.14.1
+
+common shared
+  default-language: GHC2021
+  ghc-options: -Wall -Wextra -Wcompat -Wredundant-constraints -Wunused-packages
+  default-extensions:
+      DerivingStrategies
+      DuplicateRecordFields
+      LambdaCase
+      NamedFieldPuns
+      NoFieldSelectors
+      OverloadedRecordDot
+      OverloadedStrings
+      StrictData
+
+library
+  import:           shared
+  hs-source-dirs:   src
+  exposed-modules:
+      Crypto.OPAQUE
+      Crypto.OPAQUE.Internal
+      Crypto.OPAQUE.Kdf
+      Crypto.OPAQUE.OPRF
+      Crypto.OPAQUE.Sodium
+  build-depends:
+      base >= 4.20 && < 5,
+      bytestring >= 0.11.5 && < 0.13
+  -- libsodium 1.0.18 or later: the first with ristretto255. Natively the
+  -- system's; for wasm32-wasi one built from source, whose directories
+  -- cabal-wasm.project names.
+  extra-libraries: sodium
+
+test-suite opaque-test
+  import:           shared
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Test.hs
+  other-modules:
+      Test.Vectors
+      Test.RoundTrip
+  build-depends:
+      base,
+      bytestring,
+      base16-bytestring >= 1.0 && < 1.1,
+      hspec >= 2.10 && < 2.12,
+      opaque
