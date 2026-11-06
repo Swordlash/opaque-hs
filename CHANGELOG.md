@@ -11,5 +11,9 @@ evaluated element equal to its own blinded one, and every function refuses
 a password, an identity or a context too long for the RFC's two-byte
 lengths. Tested against the RFCs' test vectors, RFC 9380's
 `expand_message_xmd` vectors and HKDF-SHA-512 and Argon2id as OpenSSL
-computes them, with QuickCheck properties of the encodings, natively and as
-wasm32-wasi.
+computes them, with QuickCheck properties of the encodings. Secrets are
+kept in memory the package zeroes: `sodium_malloc` for the states and keys,
+a scratch buffer zeroed after each step for intermediate values, and
+`scrub` to zero a value at once. HKDF is libsodium's (1.0.19 or later); the
+flag `older-libsodium` builds against 1.0.18 with a Haskell HKDF. Native
+only: not buildable for wasm32-wasi.

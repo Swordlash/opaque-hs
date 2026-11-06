@@ -15,10 +15,7 @@
 --   it, and zeroed by @sodium_free@, which the 'ForeignPtr''s finalizer
 --   calls. A failure to lock (the limit on locked memory, 8 MiB under
 --   systemd by default, reached with many login states held) is not an
---   error: the memory is then not locked. On wasm32-wasi there is no
---   @mmap@, @mprotect@ or @mlock@: @sodium_malloc@ falls back to
---   @posix_memalign@ with WASI's 64 KiB page, about 320 KiB for each
---   secret, with no guard pages; a browser holds only a few at a time.
+--   error: the memory is then not locked.
 --
 -- * A 'Scratch' is one buffer for the intermediate values of one operation
 --   (the OPRF's output, the randomized password, the envelope's keys, the

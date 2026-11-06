@@ -2,7 +2,6 @@
 -- of the key derivations, round trips with real random values, the cases
 -- other implementations test beyond the vectors, QuickCheck properties, and
 -- the memory secrets are kept in.
--- They run natively and, under Node, as wasm.
 module Main (main) where
 
 import Test.Hardening qualified

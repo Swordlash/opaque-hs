@@ -46,7 +46,7 @@ The tests run the RFCs' test vectors for this suite (RFC 9807 appendix C.1.1,
 C.1.2 and C.2.1; RFC 9497 appendix A.1.1), RFC 9380's `expand_message_xmd`
 vectors, HKDF-SHA-512 and Argon2id against OpenSSL, the cases other OPAQUE
 implementations test beyond the vectors, QuickCheck properties, and round
-trips with real random values, natively and as wasm32-wasi under Node.
+trips with real random values.
 
 ## What it does not implement
 
@@ -94,10 +94,6 @@ What it does not protect:
   systemd by default), which a server holding many login states can reach.
   A failure to lock is not an error: the memory is used unlocked, and may
   be swapped out.
-- **wasm32-wasi has no `mlock` and no guard pages.** There `sodium_malloc`
-  is `posix_memalign` with WASI's 64 KiB page, about 320 KiB per secret, and
-  locks nothing. The memory is still zeroed, but the whole linear memory is
-  readable by any script on the page.
 - Zeroing is not tested for timing or with a debugger; no OPAQUE
   implementation tests it.
 
@@ -106,9 +102,12 @@ What it does not protect:
 It needs libsodium 1.0.19 or later, found through `pkg-config`, for its
 HKDF-SHA-512. With the cabal flag `older-libsodium` it builds against 1.0.18
 (Debian 12's and Ubuntu 24.04's `libsodium-dev`), with a Haskell HKDF in its
-place. For GHC's WebAssembly backend it links `-lsodium` without
-`pkg-config`: a libsodium built for wasm32-wasi with the wasi-sdk, installed
-where the compiler finds it.
+place. It builds natively only. It is not buildable for wasm32-wasi: there
+`sodium_malloc` would have no `mlock` and no guard pages, and cost about
+320 KiB per secret (WASI's 64 KiB pages), and any script on a page can read
+a wasm program's whole memory. A browser client is better served by an
+OPAQUE implementation built for it (the wiki uses `@serenity-kit/opaque`,
+which interoperates with this one).
 
 ## Using it
 

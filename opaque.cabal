@@ -9,8 +9,7 @@ description:
   application (Argon2id, or none for the RFC's test vectors). The protocol
   is written in Haskell; every primitive (ristretto255, SHA-512,
   HMAC-SHA-512, Argon2id, random numbers) comes from libsodium. It builds
-  natively and for GHC's WebAssembly backend, with a libsodium built for
-  wasm32-wasi.
+  natively.
 license:            MIT
 license-file:       LICENSE
 author:             Mateusz Goślinowski
@@ -58,13 +57,12 @@ library
       base >= 4.20 && < 5,
       bytestring >= 0.11.5 && < 0.13,
       transformers >= 0.6 && < 0.7
+  -- Natively only: the wiki's browser client is @serenity-kit/opaque, from
+  -- npm, and no libsodium is built for wasm32-wasi. Not buildable there, so
+  -- that nothing built for the browser can come to depend on this package.
   if arch(wasm32)
-    -- For wasm32-wasi, libsodium is the one the toolchain builds from the
-    -- pinned 1.0.22 source into the wasi sysroot, so the version is
-    -- guaranteed by the pin. pkg-config is not asked: cabal would run the
-    -- host's, which knows only the host's libsodium.
-    extra-libraries: sodium
-  elif flag(older-libsodium)
+    buildable: False
+  if flag(older-libsodium)
     pkgconfig-depends: libsodium >= 1.0.18
   else
     pkgconfig-depends: libsodium >= 1.0.19
@@ -84,6 +82,8 @@ test-suite opaque-test
       Test.Properties
       Test.Memory
       Test.KdfAgreement
+  if arch(wasm32)
+    buildable: False
   -- The comparison of the HKDF polyfill with libsodium's own runs only
   -- where libsodium's is there: without older-libsodium.
   if flag(older-libsodium)
