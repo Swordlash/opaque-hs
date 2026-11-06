@@ -30,6 +30,12 @@
 --
 -- Every message, record and state is turned to bytes and back with
 -- 'Encoding'. Messages are encoded byte for byte as the RFC's structures.
+--
+-- The states, the setup and the keys keep their secrets in memory the
+-- package zeroes when the values are freed ("Crypto.OPAQUE.Secret"); a
+-- caller that knows a value's lifetime has ended zeroes it at once with
+-- 'scrub'. The encoding of a value that holds secrets is a copy the caller
+-- must protect.
 module Crypto.OPAQUE
   ( -- * Configuration
     Config (..)
@@ -67,6 +73,9 @@ module Crypto.OPAQUE
 
     -- * Encodings
   , Encoding (..)
+
+    -- * Memory
+  , Scrub (..)
   )
 where
 

@@ -124,6 +124,8 @@ spec = do
       (_, ke2) <- orFail =<< serverRespond config setup (Just record) cid ke1 defaultIdentities
       fmap (const ()) (clientFinish config cst' ke2 defaultIdentities) `shouldBe` Right ()
   describe "a password" $
-    it "of 65535 bytes or more is refused" $ do
-      r <- registrationRequest (BS.replicate 65535 0x61)
+    it "of 65536 bytes or more is refused, and one of 65535 is taken" $ do
+      r <- registrationRequest (BS.replicate 65536 0x61)
       fmap (const ()) r `shouldBe` Left InvalidInputError
+      taken <- registrationRequest (BS.replicate 65535 0x61)
+      fmap (const ()) taken `shouldBe` Right ()

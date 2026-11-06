@@ -21,6 +21,15 @@ extra-doc-files:    CHANGELOG.md
                     README.md
 tested-with:        GHC == 9.10.3, GHC == 9.14.1
 
+flag older-libsodium
+  description:
+    Build against libsodium 1.0.18, which has no HKDF of its own: HKDF-SHA-512
+    is then the Haskell polyfill in Crypto.OPAQUE.Kdf.Polyfill, over
+    libsodium's HMAC-SHA-512. Without the flag the package needs libsodium
+    1.0.19 or later and uses its crypto_kdf_hkdf_sha512.
+  default:     False
+  manual:      True
+
 common shared
   default-language: GHC2021
   ghc-options: -Wall -Wextra -Wcompat -Wredundant-constraints -Wunused-packages
@@ -41,15 +50,26 @@ library
       Crypto.OPAQUE
       Crypto.OPAQUE.Internal
       Crypto.OPAQUE.Kdf
+      Crypto.OPAQUE.Kdf.Polyfill
       Crypto.OPAQUE.OPRF
+      Crypto.OPAQUE.Secret
       Crypto.OPAQUE.Sodium
   build-depends:
       base >= 4.20 && < 5,
-      bytestring >= 0.11.5 && < 0.13
-  -- libsodium 1.0.18 or later: the first with ristretto255. Natively the
-  -- system's; for wasm32-wasi one built from source, whose directories
-  -- cabal-wasm.project names.
-  extra-libraries: sodium
+      bytestring >= 0.11.5 && < 0.13,
+      transformers >= 0.6 && < 0.7
+  if arch(wasm32)
+    -- For wasm32-wasi, libsodium is the one the toolchain builds from the
+    -- pinned 1.0.22 source into the wasi sysroot, so the version is
+    -- guaranteed by the pin. pkg-config is not asked: cabal would run the
+    -- host's, which knows only the host's libsodium.
+    extra-libraries: sodium
+  elif flag(older-libsodium)
+    pkgconfig-depends: libsodium >= 1.0.18
+  else
+    pkgconfig-depends: libsodium >= 1.0.19
+  if flag(older-libsodium)
+    cpp-options: -DOLDER_LIBSODIUM
 
 test-suite opaque-test
   import:           shared
@@ -62,6 +82,14 @@ test-suite opaque-test
       Test.RoundTrip
       Test.Hardening
       Test.Properties
+      Test.Memory
+      Test.KdfAgreement
+  -- The comparison of the HKDF polyfill with libsodium's own runs only
+  -- where libsodium's is there: without older-libsodium.
+  if flag(older-libsodium)
+    hs-source-dirs: test-older
+  else
+    hs-source-dirs: test-libsodium
   build-depends:
       base,
       bytestring,

@@ -78,16 +78,13 @@ identitiesOf v =
     , server = if has v "server_identity" then Just (at v "server_identity") else Nothing
     }
 
--- | A setup with the vector's OPRF seed and key pair. The fake record is
--- given separately where a vector uses one.
+-- | A setup with the vector's OPRF seed and key pair, through the setup's
+-- encoding (which checks that the public key is the private key's). The
+-- fake record is given separately where a vector uses one.
 setupOf :: Vector -> RegistrationRecord -> ServerSetup
 setupOf v fake =
-  ServerSetup
-    { oprfSeed = at v "oprf_seed"
-    , serverPrivateKey = at v "server_private_key"
-    , serverPublicKey = at v "server_public_key"
-    , fakeRecord = fake
-    }
+  either (error . show) id . decode $
+    at v "oprf_seed" <> at v "server_private_key" <> at v "server_public_key" <> encode fake
 
 serverRandomOf :: Vector -> ServerRandom
 serverRandomOf v =
@@ -110,7 +107,8 @@ realVector v = do
       cid = CredentialId (at v "credential_identifier")
       password = at v "password"
       setup = setupOf v unusedFake
-      unusedFake = RegistrationRecord "" "" (Envelope "" "")
+      -- Any valid record: these vectors never answer with the fake one.
+      unusedFake = fromMaybe (error "no fake record") (fakeRecordWith (BS.replicate 31 7 <> BS.singleton 0) (BS.replicate 64 9))
   it "has the server's public key of its private key" $
     scalarMultBase (at v "server_private_key") `shouldBe` Just (at v "server_public_key")
   it "derives the client's OPRF key" $
@@ -126,9 +124,9 @@ realVector v = do
     (record.envelope.nonce <> record.envelope.authTag) `shouldBe` at v "envelope"
     record.clientPublicKey `shouldBe` at v "client_public_key"
   it "stretches the OPRF output into the randomized password" $ do
-    (st, request) <- orFail (registrationRequestWith (at v "blind_registration") password)
+    (_, request) <- orFail (registrationRequestWith (at v "blind_registration") password)
     response <- orFail (registrationResponse setup cid request)
-    let output = OPRF.finalize password st.blind response.evaluatedMessage
+    let output = OPRF.finalize password (at v "blind_registration") response.evaluatedMessage
     fmap (randomizedPassword Identity) output `shouldBe` Just (Right (at v "randomized_password"))
   it "logs in" $ do
     record <- orFail (decode (at v "registration_upload"))

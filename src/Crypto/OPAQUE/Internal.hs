@@ -9,6 +9,18 @@
 --
 -- The names follow the RFC's. Each step's haddock names the RFC function it
 -- implements and says in plain words what it does.
+--
+-- = Memory
+--
+-- Every value derived from the password or from a private key lives in
+-- memory this package zeroes ("Crypto.OPAQUE.Secret"): the states and keys
+-- a step returns are 'Secret's, and the intermediate values of one step
+-- live in that step's 'Scratch' buffer, zeroed when the step ends, on its
+-- error paths too. Messages, public keys, nonces and MACs that are sent are
+-- ordinary 'ByteString's. The steps are pure functions; inside, each runs
+-- its allocations and writes in 'IO' with 'unsafePerformIO', and copies a
+-- result out of its scratch buffer, fully evaluated, before the buffer is
+-- zeroed.
 module Crypto.OPAQUE.Internal
   ( -- * Configuration
     Config (..)
@@ -34,6 +46,7 @@ module Crypto.OPAQUE.Internal
   , SessionKey (..)
   , ExportKey (..)
   , Encoding (..)
+  , Scrub (..)
 
     -- * Setup
   , generateServerSetup
@@ -64,15 +77,23 @@ module Crypto.OPAQUE.Internal
   )
 where
 
-import Control.Monad (when)
-import Crypto.OPAQUE.Kdf (hkdfExpand, hkdfExtract, i2osp)
+import Control.Monad (forM_, unless)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE)
+import Crypto.OPAQUE.Kdf (hkdfExpandInto, hkdfExtractInto, i2osp)
 import Crypto.OPAQUE.OPRF qualified as OPRF
+import Crypto.OPAQUE.Secret
 import Crypto.OPAQUE.Sodium
 import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe (unsafeIndex, unsafeUseAsCStringLen)
 import Data.Maybe (catMaybes, fromMaybe)
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
+import Foreign.Storable (peekByteOff, pokeByteOff)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | 'Config' is what both parties must agree on beyond the suite.
 --
@@ -130,10 +151,10 @@ data Error
   = -- | A message's bytes have the wrong length or hold an invalid group
     -- element.
     DeserializeError
-  | -- | The password is too long (65535 bytes or more, RFC 9497's bound on
-    -- an OPRF's input), an identity or the context is longer than its
-    -- two-byte length can say (65536 bytes or more), a blind is zero, or
-    -- the password hashes to the group's identity (negligible probability).
+  | -- | The password, an identity or the context is longer than its
+    -- two-byte length can say (65536 bytes or more), a random value given
+    -- has the wrong length, a blind is zero, or the password hashes to the
+    -- group's identity (negligible probability).
     InvalidInputError
   | -- | The server's evaluated element is the client's own blinded element
     -- sent back: a server that reflects the OPRF instead of evaluating it.
@@ -306,91 +327,100 @@ instance Encoding KE3 where
   decode bs = KE3 <$> (fields [hashBytes] bs >> pure bs)
 
 -- | 'ClientRegState' is what the client keeps between its registration
--- request and the server's response: the password, the OPRF's blind, and
--- the blinded element it sent, to refuse it back as the evaluated one.
+-- request and the server's response: the OPRF's blind and the password, in
+-- one 'Secret' (the blind's 32 bytes, then the password), and the blinded
+-- element it sent, to refuse it back as the evaluated one.
 data ClientRegState = ClientRegState
-  { password :: ByteString
-  , blind :: ByteString
+  { secret :: Secret
   , blinded :: ByteString
   }
 
+-- | The encoding is the blind, the blinded element and the password. It is
+-- secret: a copy the caller must protect.
 instance Encoding ClientRegState where
-  encode s = s.blind <> s.blinded <> s.password
+  encode s = secretEncoding s.secret [(0, scalarBytes)] s.blinded [(scalarBytes, secretLength s.secret - scalarBytes)]
   decode bs
     | BS.length bs < scalarBytes + elementBytes = Left DeserializeError
     | otherwise = do
         let (b, rest) = BS.splitAt scalarBytes bs
             (e, p) = BS.splitAt elementBytes rest
         e' <- element e
-        pure (ClientRegState p b e')
+        pure (ClientRegState (secretOf [b, p]) e')
 
 -- | 'ClientLoginState' is what the client keeps between KE1 and KE2: the
--- password, the OPRF's blind, the ephemeral private key and KE1 itself.
+-- OPRF's blind, the ephemeral private key and the password, in one
+-- 'Secret' (32 bytes, 32 bytes, then the password), and KE1 itself.
 data ClientLoginState = ClientLoginState
-  { password :: ByteString
-  , blind :: ByteString
-  , clientSecret :: ByteString
+  { secret :: Secret
   , ke1 :: KE1
   }
 
+-- | The encoding is the blind, the ephemeral private key, KE1 and the
+-- password. It is secret: a copy the caller must protect.
 instance Encoding ClientLoginState where
-  encode s = s.blind <> s.clientSecret <> encode s.ke1 <> s.password
+  encode s = secretEncoding s.secret [(0, 2 * scalarBytes)] (encode s.ke1) [(2 * scalarBytes, secretLength s.secret - 2 * scalarBytes)]
   decode bs
     | BS.length bs < 2 * scalarBytes + ke1Bytes = Left DeserializeError
     | otherwise = do
-        let (b, rest) = BS.splitAt scalarBytes bs
-            (sk, rest') = BS.splitAt scalarBytes rest
-            (k, p) = BS.splitAt ke1Bytes rest'
+        let (keys, rest) = BS.splitAt (2 * scalarBytes) bs
+            (k, p) = BS.splitAt ke1Bytes rest
         k' <- decode k
-        pure (ClientLoginState p b sk k')
+        pure (ClientLoginState (secretOf [keys, p]) k')
     where
       ke1Bytes = 2 * elementBytes + nonceBytes
 
 -- | 'ServerLoginState' is what the server keeps between KE2 and KE3: the
 -- client's MAC it expects, and the session key it will release when that
--- MAC arrives.
-data ServerLoginState = ServerLoginState
-  { expectedClientMac :: ByteString
-  , sessionKey :: ByteString
-  }
+-- MAC arrives, in one 'Secret' of 128 bytes.
+newtype ServerLoginState = ServerLoginState {secret :: Secret}
 
+-- | The encoding is the expected MAC and the session key. It is secret: a
+-- copy the caller must protect.
 instance Encoding ServerLoginState where
-  encode s = s.expectedClientMac <> s.sessionKey
-  decode bs =
-    fields [hashBytes, hashBytes] bs >>= \case
-      [m, k] -> Right (ServerLoginState m k)
-      _ -> Left DeserializeError
+  encode s = secretEncoding s.secret [(0, 2 * hashBytes)] BS.empty []
+  decode bs
+    | BS.length bs /= 2 * hashBytes = Left DeserializeError
+    | otherwise = Right (ServerLoginState (secretOf [bs]))
 
 -- | 'ServerSetup' is the server's long-term secret, generated once: the
--- seed every client's OPRF key is derived from, the server's key pair for
--- the key exchange, and a fake record that answers for clients with no
+-- seed every client's OPRF key is derived from and the server's private
+-- key for the key exchange, in one 'Secret' (64 bytes, then 32), the
+-- matching public key, and a fake record that answers for clients with no
 -- record (RFC 9807, section 6.3.2.2), so that an answer does not tell
 -- whether a client exists. Losing it makes every record useless; leaking it
 -- lets the thief of the records test password guesses offline.
 data ServerSetup = ServerSetup
-  { oprfSeed :: ByteString
-  , serverPrivateKey :: ByteString
+  { secret :: Secret
   , serverPublicKey :: ByteString
   , fakeRecord :: RegistrationRecord
   }
 
+-- | The encoding is the OPRF seed, the private key, the public key and the
+-- fake record. It is secret: the server stores it, and must protect the
+-- copy. Decoding refuses a private key whose public key is not the one
+-- given, a zero private key among them.
 instance Encoding ServerSetup where
-  encode s = s.oprfSeed <> s.serverPrivateKey <> s.serverPublicKey <> encode s.fakeRecord
+  encode s = secretEncoding s.secret [(0, hashBytes + scalarBytes)] (s.serverPublicKey <> encode s.fakeRecord) []
   decode bs =
-    fields [hashBytes, scalarBytes, elementBytes, elementBytes + hashBytes + nonceBytes + hashBytes] bs >>= \case
-      [seed, sk, pk, fake] -> do
+    fields [hashBytes + scalarBytes, elementBytes, elementBytes + hashBytes + nonceBytes + hashBytes] bs >>= \case
+      [keys, pk, fake] -> do
         pk' <- element pk
-        if scalarMultBase sk /= Just pk' then Left DeserializeError else pure ()
-        ServerSetup seed sk pk' <$> decode fake
+        fake' <- decode fake
+        let sec = secretOf [keys]
+            derived = unsafePerformIO (withSecret sec (\p -> publicBytesOr elementBytes (\o -> scalarMultBaseInto o (p `plusPtr` hashBytes))))
+        if derived == Just pk'
+          then pure ServerSetup {secret = sec, serverPublicKey = pk', fakeRecord = fake'}
+          else Left DeserializeError
       _ -> Left DeserializeError
 
 -- | 'SessionKey' is the secret the two parties agree on at login, 64
 -- bytes. Each login has a different one.
-newtype SessionKey = SessionKey ByteString
+newtype SessionKey = SessionKey Secret
 
+-- | The encoding is the key: a copy the caller must protect.
 instance Encoding SessionKey where
-  encode (SessionKey k) = k
-  decode bs = SessionKey <$> (fields [hashBytes] bs >> pure bs)
+  encode (SessionKey k) = unsafePerformIO (copySecret k)
+  decode bs = SessionKey (secretOf [bs]) <$ fields [hashBytes] bs
 
 -- | 'ExportKey' is a secret, 64 bytes, that only the client can compute,
 -- the same at registration and at every login with the same record. An
@@ -398,83 +428,244 @@ instance Encoding SessionKey where
 -- server never learns it. The RFC requires that it is used only after the
 -- server is authenticated, which 'clientFinish' ensures by returning it
 -- only then.
-newtype ExportKey = ExportKey ByteString
+newtype ExportKey = ExportKey Secret
 
+-- | The encoding is the key: a copy the caller must protect.
 instance Encoding ExportKey where
-  encode (ExportKey k) = k
-  decode bs = ExportKey <$> (fields [hashBytes] bs >> pure bs)
+  encode (ExportKey k) = unsafePerformIO (copySecret k)
+  decode bs = ExportKey (secretOf [bs]) <$ fields [hashBytes] bs
+
+-- | 'Scrub' zeroes a value's secrets now, for a caller that knows the
+-- value's lifetime has ended: a login state once the login has finished, a
+-- session key once it has been used. The value must not be used afterwards.
+-- Without it, the secrets are zeroed when the garbage collector frees them.
+class Scrub a where
+  scrub :: a -> IO ()
+
+instance Scrub ClientRegState where scrub s = scrubSecret s.secret
+
+instance Scrub ClientLoginState where scrub s = scrubSecret s.secret
+
+instance Scrub ServerLoginState where scrub s = scrubSecret s.secret
+
+instance Scrub ServerSetup where scrub s = scrubSecret s.secret
+
+instance Scrub SessionKey where scrub (SessionKey k) = scrubSecret k
+
+instance Scrub ExportKey where scrub (ExportKey k) = scrubSecret k
+
+-- | A secret made of the concatenation of bytes the caller gave (a
+-- decoding): the bytes are copied, and the caller's stay the caller's.
+secretOf :: [ByteString] -> Secret
+secretOf parts =
+  unsafePerformIO . newSecret (sum (map BS.length parts)) $ \p ->
+    let go _ [] = pure ()
+        go offset (b : bs) = do
+          copyIn (p `plusPtr` offset) b
+          go (offset + BS.length b) bs
+     in go 0 parts
+
+-- | One copy of a secret's ranges around public bytes: the ranges before,
+-- the public bytes, the ranges after. The copy is made in one buffer, so
+-- that no intermediate copy is left behind.
+secretEncoding :: Secret -> [(Int, Int)] -> ByteString -> [(Int, Int)] -> ByteString
+secretEncoding sec before public after =
+  unsafePerformIO . withSecret sec $ \p ->
+    publicBytes total $ \o -> do
+      let copyRanges offset [] = pure offset
+          copyRanges offset ((from, n) : rest) = do
+            copyBytes (o `plusPtr` offset) (p `plusPtr` from) n
+            copyRanges (offset + n) rest
+      middle <- copyRanges 0 before
+      copyIn (o `plusPtr` middle) public
+      _ <- copyRanges (middle + BS.length public) after
+      pure ()
+  where
+    total = sum (map snd before) + BS.length public + sum (map snd after)
+
+-- | Copy bytes into memory.
+copyIn :: Ptr Word8 -> ByteString -> IO ()
+copyIn p bs = unsafeUseAsCStringLen bs (\(q, n) -> copyBytes p (castPtr q) n)
+
+--------------------------------------------------------------------------------
+-- Running a step
+
+-- | A step's work: 'IO' that writes secrets into memory, and stops at the
+-- first error.
+type Op = ExceptT Error IO
+
+-- | Run a step as a pure function. 'unsafePerformIO' rather than its
+-- dupable cousin: a duplicated evaluation could be abandoned without
+-- running the handler that zeroes its scratch buffer.
+pureStep :: IO (Either Error a) -> Either Error a
+pureStep = unsafePerformIO
+
+-- | Run a step's work with a scratch buffer of @n@ bytes, zeroed when the
+-- work ends, however it ends.
+withScratchOp :: Int -> (Scratch -> Op a) -> IO (Either Error a)
+withScratchOp n f = withScratch n (runExceptT . f)
+
+-- | Take @n@ bytes of the step's scratch buffer.
+alloc :: Scratch -> Int -> Op (Ptr Word8)
+alloc s n = lift (scratch s n)
+
+-- | Fail with the error when the action reports failure.
+need :: Error -> IO Bool -> Op ()
+need e act = lift act >>= \ok -> unless ok (throwE e)
+
+-- | The action's result, or the error when there is none.
+needJust :: Error -> IO (Maybe a) -> Op a
+needJust e act = lift act >>= maybe (throwE e) pure
+
+-- | Fail with the error unless the condition holds.
+check :: Error -> Bool -> Op ()
+check e ok = unless ok (throwE e)
+
+-- | A public element as memory, for a group operation: 'False' when it has
+-- the wrong length.
+withElement :: ByteString -> (Ptr Word8 -> IO Bool) -> IO Bool
+withElement e f
+  | BS.length e /= elementBytes = pure False
+  | otherwise = unsafeUseAsCStringLen e (\(p, _) -> f (castPtr p))
+
+-- | XOR public bytes with as many bytes of memory (a pad): the result is
+-- public, a masked or unmasked response.
+xorWith :: Ptr Word8 -> ByteString -> IO ByteString
+xorWith pad bs =
+  publicBytes (BS.length bs) $ \o ->
+    forM_ [0 .. BS.length bs - 1] $ \i -> do
+      x <- peekByteOff pad i :: IO Word8
+      pokeByteOff o i (x `xor` unsafeIndex bs i)
+
+--------------------------------------------------------------------------------
+-- Setup
+
+-- | The info string of the key pairs OPAQUE derives for the key exchange.
+dhInfo :: ByteString
+dhInfo = "OPAQUE-DeriveDiffieHellmanKeyPair"
 
 -- | 'generateServerSetup' makes a new 'ServerSetup' from libsodium's
 -- random numbers. A server runs it once and keeps the result secret.
 generateServerSetup :: IO (Either Error ServerSetup)
 generateServerSetup = do
-  seed <- randomBytes hashBytes
-  keySeed <- randomBytes seedBytes
-  fakeKey <- randomScalar
   fakeMask <- randomBytes hashBytes
-  pure $ do
-    fake <- maybe (Left DeriveKeyPairError) Right (fakeRecordWith fakeKey fakeMask)
-    serverSetupWith seed keySeed fake
+  fake <- withScrubbed scalarBytes $ \fakeKey -> do
+    scalarRandomInto fakeKey
+    fmap (fakeRecordOf fakeMask) <$> publicBytesOr elementBytes (`scalarMultBaseInto` fakeKey)
+  withScrubbed seedBytes $ \keySeed -> do
+    randomInto keySeed seedBytes
+    setupFrom (`randomInto` hashBytes) (Mem keySeed seedBytes) fake
+
+-- | A setup whose OPRF seed the action writes, with the private key derived
+-- from the key seed.
+setupFrom :: (Ptr Word8 -> IO ()) -> Part -> Maybe RegistrationRecord -> IO (Either Error ServerSetup)
+setupFrom fillSeed keySeed fake = case fake of
+  Nothing -> pure (Left DeriveKeyPairError)
+  Just fake' -> do
+    sec <- newSecret (hashBytes + scalarBytes) $ \p -> do
+      fillSeed p
+      memzero (p `plusPtr` hashBytes) scalarBytes
+    pk <- withSecret sec (\p -> OPRF.deriveKeyPairInto (p `plusPtr` hashBytes) [keySeed] dhInfo)
+    case pk of
+      Nothing -> Left DeriveKeyPairError <$ scrubSecret sec
+      Just pk' -> pure (Right ServerSetup {secret = sec, serverPublicKey = pk', fakeRecord = fake'})
 
 -- | 'serverSetupWith' builds a 'ServerSetup' from an OPRF seed (64 bytes), a
 -- seed for the server's key pair (32 bytes) and a fake record.
 serverSetupWith :: ByteString -> ByteString -> RegistrationRecord -> Either Error ServerSetup
-serverSetupWith seed keySeed fake = do
-  (sk, pk) <- deriveDiffieHellmanKeyPair keySeed
-  pure ServerSetup {oprfSeed = seed, serverPrivateKey = sk, serverPublicKey = pk, fakeRecord = fake}
+serverSetupWith seed keySeed fake
+  | BS.length seed /= hashBytes || BS.length keySeed /= seedBytes = Left InvalidInputError
+  | otherwise = pureStep (setupFrom (`copyIn` seed) (Pub keySeed) (Just fake))
 
 -- | 'fakeRecordWith' builds the fake record the RFC prescribes from a
 -- private scalar (its public key becomes the record's) and a 64-byte masking
 -- key; the envelope is all zeros.
 fakeRecordWith :: ByteString -> ByteString -> Maybe RegistrationRecord
-fakeRecordWith sk mask = do
-  pk <- scalarMultBase sk
-  pure
-    RegistrationRecord
-      { clientPublicKey = pk
-      , maskingKey = mask
-      , envelope = Envelope (BS.replicate nonceBytes 0) (BS.replicate hashBytes 0)
-      }
+fakeRecordWith sk mask
+  | BS.length mask /= hashBytes = Nothing
+  | otherwise = fakeRecordOf mask <$> scalarMultBase sk
 
--- | 'deriveDiffieHellmanKeyPair' is the RFC's DeriveDiffieHellmanKeyPair for
--- ristretto255: RFC 9497's DeriveKeyPair with OPAQUE's own info string.
-deriveDiffieHellmanKeyPair :: ByteString -> Either Error (ByteString, ByteString)
-deriveDiffieHellmanKeyPair seed =
-  maybe (Left DeriveKeyPairError) Right (OPRF.deriveKeyPair seed "OPAQUE-DeriveDiffieHellmanKeyPair")
+fakeRecordOf :: ByteString -> ByteString -> RegistrationRecord
+fakeRecordOf mask pk =
+  RegistrationRecord
+    { clientPublicKey = pk
+    , maskingKey = mask
+    , envelope = Envelope (BS.replicate nonceBytes 0) (BS.replicate hashBytes 0)
+    }
 
--- | Diffie-Hellman over ristretto255: a scalar times an element. Elements
--- reaching it were checked when their message was decoded.
-diffieHellman :: ByteString -> ByteString -> Either Error ByteString
-diffieHellman k b = maybe (Left DeserializeError) Right (scalarMult k b)
+--------------------------------------------------------------------------------
+-- Steps
 
--- | 'oprfKey' is the client's OPRF key, derived from the server's OPRF seed
--- and the credential identifier (CreateRegistrationResponse's first step).
--- Every client has its own, and the server stores none of them.
+-- | 'oprfKeyInto' writes the client's OPRF key, derived from the server's
+-- OPRF seed (64 bytes at @seed@) and the credential identifier
+-- (CreateRegistrationResponse's first step). Every client has its own, and
+-- the server stores none of them.
+oprfKeyInto :: Scratch -> Ptr Word8 -> CredentialId -> Ptr Word8 -> Op ()
+oprfKeyInto s seed (CredentialId cid) out = do
+  keySeed <- alloc s seedBytes
+  lift (hkdfExpandInto keySeed seedBytes (Mem seed hashBytes) (cid <> "OprfKey"))
+  _ <- needJust DeriveKeyPairError (OPRF.deriveKeyPairInto out [Mem keySeed seedBytes] "OPAQUE-DeriveKeyPair")
+  pure ()
+
+-- | 'oprfKey' is the client's OPRF key as bytes, for the test vectors.
 oprfKey :: ServerSetup -> CredentialId -> Either Error ByteString
-oprfKey setup (CredentialId cid) =
-  case OPRF.deriveKeyPair (hkdfExpand setup.oprfSeed (cid <> "OprfKey") scalarBytes) "OPAQUE-DeriveKeyPair" of
-    Just (k, _) -> Right k
-    Nothing -> Left DeriveKeyPairError
+oprfKey setup cid = pureStep . withSecret setup.secret $ \sp ->
+  withScratchOp 64 $ \s -> do
+    k <- alloc s scalarBytes
+    oprfKeyInto s sp cid k
+    lift (publicBytes scalarBytes (\o -> copyBytes o k scalarBytes))
 
--- | 'stretch' is the KSF's Stretch.
+-- | 'stretchInto' is the KSF's Stretch, from 64 bytes at @input@ to 64 at
+-- @out@.
+stretchInto :: Ksf -> Ptr Word8 -> Ptr Word8 -> Op ()
+stretchInto Identity out input = lift (copyBytes out input hashBytes)
+stretchInto (Argon2id ops mem) out input = need KsfError (argon2idInto out (BS.replicate 16 0) (Mem input hashBytes) ops mem)
+
+-- | 'stretch' is 'stretchInto' over bytes, for the tests.
 stretch :: Ksf -> ByteString -> Either Error ByteString
-stretch Identity msg = Right msg
-stretch (Argon2id ops mem) msg = maybe (Left KsfError) Right (argon2id ops mem (BS.replicate 16 0) msg)
+stretch k msg
+  | BS.length msg /= hashBytes = Left InvalidInputError
+  | otherwise = pureStep . withScratchOp (2 * hashBytes) $ \s -> do
+      input <- alloc s hashBytes
+      out <- alloc s hashBytes
+      lift (copyIn input msg)
+      stretchInto k out input
+      lift (publicBytes hashBytes (\o -> copyBytes o out hashBytes))
 
--- | 'randomizedPassword' turns the OPRF's output into the key the envelope
--- is derived from: Extract over the output and its stretched form.
+-- | 'randomizedPasswordInto' turns the OPRF's output (64 bytes at
+-- @output@) into the key the envelope is derived from, at @rwd@: Extract
+-- over the output and its stretched form.
+randomizedPasswordInto :: Scratch -> Ksf -> Ptr Word8 -> Ptr Word8 -> Op ()
+randomizedPasswordInto s k rwd output = do
+  both <- alloc s (2 * hashBytes)
+  lift (copyBytes both output hashBytes)
+  stretchInto k (both `plusPtr` hashBytes) output
+  lift (hkdfExtractInto rwd "" both (2 * hashBytes))
+
+-- | 'randomizedPassword' is 'randomizedPasswordInto' over bytes, for the
+-- test vectors.
 randomizedPassword :: Ksf -> ByteString -> Either Error ByteString
-randomizedPassword k oprfOutput = do
-  stretched <- stretch k oprfOutput
-  pure (hkdfExtract "" (oprfOutput <> stretched))
+randomizedPassword k output
+  | BS.length output /= hashBytes = Left InvalidInputError
+  | otherwise = pureStep . withScratchOp (4 * hashBytes) $ \s -> do
+      input <- alloc s hashBytes
+      rwd <- alloc s hashBytes
+      lift (copyIn input output)
+      randomizedPasswordInto s k rwd input
+      lift (publicBytes hashBytes (\o -> copyBytes o rwd hashBytes))
 
--- | Blind the password, checking its length (RFC 9497, section 5.1: an
--- input is smaller than 65535 bytes). A zero blind is refused: its
--- blinded element would be the identity.
-blindPassword :: ByteString -> ByteString -> Either Error (ByteString, ByteString)
-blindPassword r password
-  | BS.length password >= 65535 = Left InvalidInputError
-  | otherwise = maybe (Left InvalidInputError) Right (OPRF.blindWith r password)
+-- | 'deriveDiffieHellmanKeyPair' is the RFC's DeriveDiffieHellmanKeyPair
+-- for ristretto255 over bytes, for the tests: RFC 9497's DeriveKeyPair with
+-- OPAQUE's own info string.
+deriveDiffieHellmanKeyPair :: ByteString -> Either Error (ByteString, ByteString)
+deriveDiffieHellmanKeyPair seed = maybe (Left DeriveKeyPairError) Right (OPRF.deriveKeyPair seed dhInfo)
+
+-- | Check that the password fits the OPRF (RFC 9497, section 5.1: an
+-- input is smaller than 65535 bytes).
+checkPassword :: ByteString -> Either Error ()
+checkPassword password
+  | BS.length password > OPRF.maxInputBytes = Left InvalidInputError
+  | otherwise = Right ()
 
 -- | Check that the context and the identities fit their two-byte lengths
 -- (RFC 9807's @\<1..2^16-1>@), so that no length wraps silently.
@@ -483,27 +674,45 @@ checkLengths config ids
   | any ((> 65535) . BS.length) (config.context : catMaybes [ids.client, ids.server]) = Left InvalidInputError
   | otherwise = Right ()
 
--- | 'registrationRequest' is CreateRegistrationRequest: the client blinds
--- its password with a random scalar, keeps the blind and sends the blinded
--- element.
+--------------------------------------------------------------------------------
+-- Registration
+
+-- | 'registrationRequest' is CreateRegistrationRequest: the client copies
+-- its password into secret memory, blinds it with a random scalar, keeps
+-- the blind and sends the blinded element. The caller's copy of the
+-- password is the caller's to protect.
 registrationRequest :: ByteString -> IO (Either Error (ClientRegState, RegistrationRequest))
-registrationRequest password = (`registrationRequestWith` password) <$> randomScalar
+registrationRequest = registrationRequestFrom scalarRandomInto
 
 -- | 'registrationRequestWith' is 'registrationRequest' with the blind given.
 registrationRequestWith :: ByteString -> ByteString -> Either Error (ClientRegState, RegistrationRequest)
-registrationRequestWith r password = do
-  (b, blinded) <- blindPassword r password
-  pure (ClientRegState {password, blind = b, blinded}, RegistrationRequest blinded)
+registrationRequestWith r password
+  | BS.length r /= scalarBytes = Left InvalidInputError
+  | otherwise = pureStep (registrationRequestFrom (`copyIn` r) password)
+
+registrationRequestFrom :: (Ptr Word8 -> IO ()) -> ByteString -> IO (Either Error (ClientRegState, RegistrationRequest))
+registrationRequestFrom fillBlind password = case checkPassword password of
+  Left e -> pure (Left e)
+  Right () -> do
+    sec <- newSecret (scalarBytes + BS.length password) $ \p -> do
+      fillBlind p
+      copyIn (p `plusPtr` scalarBytes) password
+    blinded <- withSecret sec (\p -> OPRF.blindInto p (Mem (p `plusPtr` scalarBytes) (BS.length password)))
+    case blinded of
+      Nothing -> Left InvalidInputError <$ scrubSecret sec
+      Just b -> pure (Right (ClientRegState {secret = sec, blinded = b}, RegistrationRequest b))
 
 -- | 'registrationResponse' is CreateRegistrationResponse: the server derives
 -- the client's OPRF key from its seed and the credential identifier,
 -- evaluates the blinded password with it, and sends the result with its
 -- public key. It keeps nothing.
 registrationResponse :: ServerSetup -> CredentialId -> RegistrationRequest -> Either Error RegistrationResponse
-registrationResponse setup cid request = do
-  k <- oprfKey setup cid
-  evaluated <- maybe (Left DeserializeError) Right (OPRF.blindEvaluate k request.blindedMessage)
-  pure RegistrationResponse {evaluatedMessage = evaluated, serverPublicKey = setup.serverPublicKey}
+registrationResponse setup cid request = pureStep . withSecret setup.secret $ \sp ->
+  withScratchOp 64 $ \s -> do
+    k <- alloc s scalarBytes
+    oprfKeyInto s sp cid k
+    evaluated <- needJust DeserializeError (OPRF.blindEvaluateWith k request.blindedMessage)
+    pure RegistrationResponse {evaluatedMessage = evaluated, serverPublicKey = setup.serverPublicKey}
 
 -- | 'finalizeRegistration' is FinalizeRegistrationRequest: the client
 -- unblinds the OPRF's output, stretches it into the randomized password,
@@ -512,29 +721,39 @@ registrationResponse setup cid request = do
 finalizeRegistration :: Config -> ClientRegState -> RegistrationResponse -> Identities -> IO (Either Error (RegistrationRecord, ExportKey))
 finalizeRegistration config st response ids = do
   n <- randomBytes nonceBytes
-  pure (finalizeRegistrationWith config n st response ids)
+  finalizeRegistrationIO config n st response ids
 
 -- | 'finalizeRegistrationWith' is 'finalizeRegistration' with the envelope's
 -- nonce given.
 finalizeRegistrationWith :: Config -> ByteString -> ClientRegState -> RegistrationResponse -> Identities -> Either Error (RegistrationRecord, ExportKey)
-finalizeRegistrationWith config envelopeNonce st response ids = do
-  checkLengths config ids
-  when (response.evaluatedMessage == st.blinded) (Left ReflectedValueError)
-  _ <- element response.serverPublicKey
-  oprfOutput <- maybe (Left DeserializeError) Right (OPRF.finalize st.password st.blind response.evaluatedMessage)
-  rwd <- randomizedPassword config.ksf oprfOutput
-  let maskingKey = hkdfExpand rwd "MaskingKey" hashBytes
-  (env, clientPublicKey, exportKey) <- store rwd envelopeNonce response.serverPublicKey ids
-  pure (RegistrationRecord {clientPublicKey, maskingKey, envelope = env}, ExportKey exportKey)
+finalizeRegistrationWith config envelopeNonce st response ids = pureStep (finalizeRegistrationIO config envelopeNonce st response ids)
 
--- | The keys the envelope's nonce and the randomized password lead to:
--- the MAC key, the export key and the seed of the client's key pair.
-envelopeKeys :: ByteString -> ByteString -> (ByteString, ByteString, ByteString)
-envelopeKeys rwd n =
-  ( hkdfExpand rwd (n <> "AuthKey") hashBytes
-  , hkdfExpand rwd (n <> "ExportKey") hashBytes
-  , hkdfExpand rwd (n <> "PrivateKey") seedBytes
-  )
+finalizeRegistrationIO :: Config -> ByteString -> ClientRegState -> RegistrationResponse -> Identities -> IO (Either Error (RegistrationRecord, ExportKey))
+finalizeRegistrationIO config envelopeNonce st response ids = withSecret st.secret $ \sp ->
+  withScratchOp 2048 $ \s -> do
+    ExceptT (pure (checkLengths config ids))
+    check InvalidInputError (BS.length envelopeNonce == nonceBytes)
+    check ReflectedValueError (response.evaluatedMessage /= st.blinded)
+    _ <- ExceptT (pure (element response.serverPublicKey))
+    let password = Mem (sp `plusPtr` scalarBytes) (secretLength st.secret - scalarBytes)
+    output <- alloc s hashBytes
+    need DeserializeError (OPRF.finalizeInto output password sp response.evaluatedMessage)
+    rwd <- alloc s hashBytes
+    randomizedPasswordInto s config.ksf rwd output
+    maskingKey <- lift (publicBytes hashBytes (\o -> hkdfExpandInto o hashBytes (Mem rwd hashBytes) "MaskingKey"))
+    export <- alloc s hashBytes
+    (env, clientPublicKey) <- store s rwd envelopeNonce response.serverPublicKey ids export
+    exportKey <- lift (secretFromPtr export hashBytes)
+    pure (RegistrationRecord {clientPublicKey, maskingKey, envelope = env}, ExportKey exportKey)
+
+-- | The keys the envelope's nonce and the randomized password lead to,
+-- written into memory: the MAC key, the export key and the seed of the
+-- client's key pair.
+envelopeKeysInto :: Ptr Word8 -> ByteString -> Ptr Word8 -> Ptr Word8 -> Ptr Word8 -> IO ()
+envelopeKeysInto rwd n authKey exportKey seed = do
+  hkdfExpandInto authKey hashBytes (Mem rwd hashBytes) (n <> "AuthKey")
+  hkdfExpandInto exportKey hashBytes (Mem rwd hashBytes) (n <> "ExportKey")
+  hkdfExpandInto seed seedBytes (Mem rwd hashBytes) (n <> "PrivateKey")
 
 -- | CreateCleartextCredentials, encoded as the envelope's MAC covers it:
 -- the server's public key, then each identity with its length. An identity
@@ -547,43 +766,71 @@ encodeCleartext :: (ByteString, ByteString, ByteString) -> ByteString
 encodeCleartext (spk, sid, cid) = spk <> i2osp 2 (BS.length sid) <> sid <> i2osp 2 (BS.length cid) <> cid
 
 -- | Store: derive the client's key pair from the randomized password and
--- the nonce, and MAC the nonce with the cleartext credentials.
-store :: ByteString -> ByteString -> ByteString -> Identities -> Either Error (Envelope, ByteString, ByteString)
-store rwd n serverPk ids = do
-  let (authKey, exportKey, seed) = envelopeKeys rwd n
-  (_, clientPk) <- deriveDiffieHellmanKeyPair seed
-  let tag = hmacSha512 authKey [n, encodeCleartext (cleartextCredentials serverPk clientPk ids)]
-  pure (Envelope n tag, clientPk, exportKey)
+-- the nonce, and MAC the nonce with the cleartext credentials. The export
+-- key is written at @export@.
+store :: Scratch -> Ptr Word8 -> ByteString -> ByteString -> Identities -> Ptr Word8 -> Op (Envelope, ByteString)
+store s rwd n serverPk ids export = do
+  authKey <- alloc s hashBytes
+  seed <- alloc s seedBytes
+  clientSk <- alloc s scalarBytes
+  lift (envelopeKeysInto rwd n authKey export seed)
+  clientPk <- needJust DeriveKeyPairError (OPRF.deriveKeyPairInto clientSk [Mem seed seedBytes] dhInfo)
+  tag <- lift . publicBytes hashBytes $ \o ->
+    hmacSha512Into o (Mem authKey hashBytes) [Pub n, Pub (encodeCleartext (cleartextCredentials serverPk clientPk ids))]
+  pure (Envelope n tag, clientPk)
 
--- | Recover: derive the client's key pair again and check the envelope's
--- MAC. A wrong password, or a fake record, fails here.
-recover :: ByteString -> ByteString -> Envelope -> Identities -> Either Error (ByteString, (ByteString, ByteString, ByteString), ByteString)
-recover rwd serverPk env ids = do
-  let (authKey, exportKey, seed) = envelopeKeys rwd env.nonce
-  (clientSk, clientPk) <- deriveDiffieHellmanKeyPair seed
+-- | Recover: derive the client's key pair again, writing the private key at
+-- @clientSk@ and the export key at @export@, and check the envelope's MAC.
+-- A wrong password, or a fake record, fails here.
+recover :: Scratch -> Ptr Word8 -> ByteString -> Envelope -> Identities -> Ptr Word8 -> Ptr Word8 -> Op (ByteString, ByteString, ByteString)
+recover s rwd serverPk env ids clientSk export = do
+  authKey <- alloc s hashBytes
+  seed <- alloc s seedBytes
+  expected <- alloc s hashBytes
+  lift (envelopeKeysInto rwd env.nonce authKey export seed)
+  clientPk <- needJust DeriveKeyPairError (OPRF.deriveKeyPairInto clientSk [Mem seed seedBytes] dhInfo)
   let creds = cleartextCredentials serverPk clientPk ids
-      expected = hmacSha512 authKey [env.nonce, encodeCleartext creds]
-  if constantTimeEqual env.authTag expected
-    then Right (clientSk, creds, exportKey)
-    else Left EnvelopeRecoveryError
+  lift (hmacSha512Into expected (Mem authKey hashBytes) [Pub env.nonce, Pub (encodeCleartext creds)])
+  need EnvelopeRecoveryError (equalTo env.authTag expected hashBytes)
+  pure creds
 
--- | 'clientStart' is GenerateKE1: the client blinds its password, makes an
--- ephemeral key pair and a nonce, and sends KE1.
+--------------------------------------------------------------------------------
+-- Login
+
+-- | 'clientStart' is GenerateKE1: the client copies its password into
+-- secret memory, blinds it, makes an ephemeral key pair and a nonce, and
+-- sends KE1. The caller's copy of the password is the caller's to protect.
 clientStart :: ByteString -> IO (Either Error (ClientLoginState, KE1))
 clientStart password = do
-  r <- randomScalar
   n <- randomBytes nonceBytes
-  seed <- randomBytes seedBytes
-  pure (clientStartWith r n seed password)
+  clientStartFrom scalarRandomInto n (`randomInto` seedBytes) password
 
 -- | 'clientStartWith' is 'clientStart' with the blind, the nonce and the
 -- ephemeral key's seed given.
 clientStartWith :: ByteString -> ByteString -> ByteString -> ByteString -> Either Error (ClientLoginState, KE1)
-clientStartWith r n keyshareSeed password = do
-  (b, blinded) <- blindPassword r password
-  (secret, share) <- deriveDiffieHellmanKeyPair keyshareSeed
-  let ke1 = KE1 {blindedMessage = blinded, clientNonce = n, clientPublicKeyshare = share}
-  pure (ClientLoginState {password, blind = b, clientSecret = secret, ke1}, ke1)
+clientStartWith r n keyshareSeed password
+  | BS.length r /= scalarBytes || BS.length keyshareSeed /= seedBytes || BS.length n /= nonceBytes = Left InvalidInputError
+  | otherwise = pureStep (clientStartFrom (`copyIn` r) n (`copyIn` keyshareSeed) password)
+
+clientStartFrom :: (Ptr Word8 -> IO ()) -> ByteString -> (Ptr Word8 -> IO ()) -> ByteString -> IO (Either Error (ClientLoginState, KE1))
+clientStartFrom fillBlind n fillSeed password = case checkPassword password of
+  Left e -> pure (Left e)
+  Right () -> withScrubbed seedBytes $ \seed -> do
+    fillSeed seed
+    sec <- newSecret (2 * scalarBytes + BS.length password) $ \p -> do
+      fillBlind p
+      memzero (p `plusPtr` scalarBytes) scalarBytes
+      copyIn (p `plusPtr` (2 * scalarBytes)) password
+    made <- withSecret sec $ \p -> do
+      share <- OPRF.deriveKeyPairInto (p `plusPtr` scalarBytes) [Mem seed seedBytes] dhInfo
+      blinded <- OPRF.blindInto p (Mem (p `plusPtr` (2 * scalarBytes)) (BS.length password))
+      pure (share, blinded)
+    case made of
+      (Just share, Just blinded) ->
+        let ke1 = KE1 {blindedMessage = blinded, clientNonce = n, clientPublicKeyshare = share}
+         in pure (Right (ClientLoginState {secret = sec, ke1}, ke1))
+      (Nothing, _) -> Left DeriveKeyPairError <$ scrubSecret sec
+      (_, Nothing) -> Left InvalidInputError <$ scrubSecret sec
 
 -- | 'ServerRandom' is the random values of one KE2: the masking nonce, the
 -- server's nonce and the seed of its ephemeral key pair.
@@ -608,45 +855,51 @@ serverRespond :: Config -> ServerSetup -> Maybe RegistrationRecord -> Credential
 serverRespond config setup record cid ke1 ids = do
   mn <- randomBytes nonceBytes
   sn <- randomBytes nonceBytes
-  seed <- randomBytes seedBytes
-  let rnd = ServerRandom {maskingNonce = mn, serverNonce = sn, keyshareSeed = seed}
-  pure (serverRespondWith config setup (fromMaybe setup.fakeRecord record) cid rnd ke1 ids)
+  withScrubbed seedBytes $ \seed -> do
+    randomInto seed seedBytes
+    serverRespondIO config setup (fromMaybe setup.fakeRecord record) cid mn sn (Mem seed seedBytes) ke1 ids
 
 -- | 'serverRespondWith' is 'serverRespond' with the record and the random
 -- values given.
 serverRespondWith :: Config -> ServerSetup -> RegistrationRecord -> CredentialId -> ServerRandom -> KE1 -> Identities -> Either Error (ServerLoginState, KE2)
-serverRespondWith config setup record cid rnd ke1 ids = do
-  checkLengths config ids
-  -- CreateCredentialResponse
-  k <- oprfKey setup cid
-  evaluated <- maybe (Left DeserializeError) Right (OPRF.blindEvaluate k ke1.blindedMessage)
-  let pad = hkdfExpand record.maskingKey (rnd.maskingNonce <> "CredentialResponsePad") maskedBytes
-      plain = setup.serverPublicKey <> record.envelope.nonce <> record.envelope.authTag
-      credentialResponse =
-        CredentialResponse
-          { evaluatedMessage = evaluated
-          , maskingNonce = rnd.maskingNonce
-          , maskedResponse = BS.pack (BS.zipWith xor pad plain)
-          }
-      (_, sid, cidentity) = cleartextCredentials setup.serverPublicKey record.clientPublicKey ids
-  -- AuthServerRespond
-  (eSk, ePk) <- deriveDiffieHellmanKeyPair rnd.keyshareSeed
-  let pre = preamble config.context cidentity ke1 sid credentialResponse rnd.serverNonce ePk
-  dh1 <- diffieHellman eSk ke1.clientPublicKeyshare
-  dh2 <- diffieHellman setup.serverPrivateKey ke1.clientPublicKeyshare
-  dh3 <- diffieHellman eSk record.clientPublicKey
-  let (km2, km3, sessionKey) = deriveKeys (dh1 <> dh2 <> dh3) pre
-      mac = hmacSha512 km2 [sha512 [pre]]
-      expected = hmacSha512 km3 [sha512 [pre, mac]]
-  pure
-    ( ServerLoginState {expectedClientMac = expected, sessionKey}
-    , KE2
-        { credentialResponse
-        , serverNonce = rnd.serverNonce
-        , serverPublicKeyshare = ePk
-        , serverMac = mac
-        }
-    )
+serverRespondWith config setup record cid rnd ke1 ids
+  | BS.length rnd.keyshareSeed /= seedBytes = Left InvalidInputError
+  | otherwise = pureStep (serverRespondIO config setup record cid rnd.maskingNonce rnd.serverNonce (Pub rnd.keyshareSeed) ke1 ids)
+
+serverRespondIO :: Config -> ServerSetup -> RegistrationRecord -> CredentialId -> ByteString -> ByteString -> Part -> KE1 -> Identities -> IO (Either Error (ServerLoginState, KE2))
+serverRespondIO config setup record cid mn sn seed ke1 ids = withSecret setup.secret $ \sp ->
+  withScratchOp 2048 $ \s -> do
+    ExceptT (pure (checkLengths config ids))
+    check InvalidInputError (BS.length mn == nonceBytes && BS.length sn == nonceBytes && partLength seed == seedBytes)
+    check DeserializeError (BS.length record.maskingKey == hashBytes)
+    -- CreateCredentialResponse
+    k <- alloc s scalarBytes
+    oprfKeyInto s sp cid k
+    evaluated <- needJust DeserializeError (OPRF.blindEvaluateWith k ke1.blindedMessage)
+    pad <- alloc s maskedBytes
+    lift (hkdfExpandInto pad maskedBytes (Pub record.maskingKey) (mn <> "CredentialResponsePad"))
+    let plain = setup.serverPublicKey <> record.envelope.nonce <> record.envelope.authTag
+    check DeserializeError (BS.length plain == maskedBytes)
+    masked <- lift (xorWith pad plain)
+    let credentialResponse = CredentialResponse {evaluatedMessage = evaluated, maskingNonce = mn, maskedResponse = masked}
+        (_, sid, cidentity) = cleartextCredentials setup.serverPublicKey record.clientPublicKey ids
+    -- AuthServerRespond
+    eSk <- alloc s scalarBytes
+    ePk <- needJust DeriveKeyPairError (OPRF.deriveKeyPairInto eSk [seed] dhInfo)
+    let pre = preamble config.context cidentity ke1 sid credentialResponse sn ePk
+    ikm <- alloc s (3 * elementBytes)
+    need DeserializeError (withElement ke1.clientPublicKeyshare (scalarMultInto ikm eSk))
+    need DeserializeError (withElement ke1.clientPublicKeyshare (scalarMultInto (ikm `plusPtr` elementBytes) (sp `plusPtr` hashBytes)))
+    need DeserializeError (withElement record.clientPublicKey (scalarMultInto (ikm `plusPtr` (2 * elementBytes)) eSk))
+    (km2, km3, sessionKey) <- deriveKeys s ikm pre
+    mac <- lift (publicBytes hashBytes (\o -> hmacSha512Into o (Mem km2 hashBytes) [Pub (sha512 [pre])]))
+    st <- lift . newSecret (2 * hashBytes) $ \p -> do
+      hmacSha512Into p (Mem km3 hashBytes) [Pub (sha512 [pre, mac])]
+      copyBytes (p `plusPtr` hashBytes) sessionKey hashBytes
+    pure
+      ( ServerLoginState st
+      , KE2 {credentialResponse, serverNonce = sn, serverPublicKeyshare = ePk, serverMac = mac}
+      )
 
 -- | 'clientFinish' is GenerateKE3. The client unblinds the OPRF's output,
 -- stretches it, removes the mask from the server's answer, opens its
@@ -654,45 +907,62 @@ serverRespondWith config setup record cid rnd ke1 ids = do
 -- and computes its own MAC for KE3. Only then does it return the session
 -- key and the export key.
 clientFinish :: Config -> ClientLoginState -> KE2 -> Identities -> Either Error (KE3, SessionKey, ExportKey)
-clientFinish config st ke2 ids = do
-  checkLengths config ids
-  -- RecoverCredentials
-  let cr = ke2.credentialResponse
-  when (cr.evaluatedMessage == st.ke1.blindedMessage) (Left ReflectedValueError)
-  oprfOutput <- maybe (Left DeserializeError) Right (OPRF.finalize st.password st.blind cr.evaluatedMessage)
-  rwd <- randomizedPassword config.ksf oprfOutput
-  let maskingKey = hkdfExpand rwd "MaskingKey" hashBytes
-      pad = hkdfExpand maskingKey (cr.maskingNonce <> "CredentialResponsePad") maskedBytes
-      plain = BS.pack (BS.zipWith xor pad cr.maskedResponse)
-      (serverPk, rest) = BS.splitAt elementBytes plain
-      (n, tag) = BS.splitAt nonceBytes rest
-  (clientSk, (_, sid, cidentity), exportKey) <- recover rwd serverPk (Envelope n tag) ids
-  -- The envelope's MAC covers the server's key, so a key that passes it was
-  -- registered; it is checked all the same before it is used.
-  _ <- element serverPk
-  -- AuthClientFinalize
-  dh1 <- diffieHellman st.clientSecret ke2.serverPublicKeyshare
-  dh2 <- diffieHellman st.clientSecret serverPk
-  dh3 <- diffieHellman clientSk ke2.serverPublicKeyshare
-  let pre = preamble config.context cidentity st.ke1 sid cr ke2.serverNonce ke2.serverPublicKeyshare
-      (km2, km3, sessionKey) = deriveKeys (dh1 <> dh2 <> dh3) pre
-      expected = hmacSha512 km2 [sha512 [pre]]
-  if constantTimeEqual ke2.serverMac expected
-    then
-      let clientMac = hmacSha512 km3 [sha512 [pre, expected]]
-       in Right (KE3 clientMac, SessionKey sessionKey, ExportKey exportKey)
-    else Left ServerAuthenticationError
+clientFinish config st ke2 ids = pureStep . withSecret st.secret $ \sp ->
+  withScratchOp 2048 $ \s -> do
+    ExceptT (pure (checkLengths config ids))
+    -- RecoverCredentials
+    let cr = ke2.credentialResponse
+        blind = sp
+        clientSecret = sp `plusPtr` scalarBytes
+        password = Mem (sp `plusPtr` (2 * scalarBytes)) (secretLength st.secret - 2 * scalarBytes)
+    check ReflectedValueError (cr.evaluatedMessage /= st.ke1.blindedMessage)
+    check DeserializeError (BS.length cr.maskedResponse == maskedBytes)
+    output <- alloc s hashBytes
+    need DeserializeError (OPRF.finalizeInto output password blind cr.evaluatedMessage)
+    rwd <- alloc s hashBytes
+    randomizedPasswordInto s config.ksf rwd output
+    maskingKey <- alloc s hashBytes
+    lift (hkdfExpandInto maskingKey hashBytes (Mem rwd hashBytes) "MaskingKey")
+    pad <- alloc s maskedBytes
+    lift (hkdfExpandInto pad maskedBytes (Mem maskingKey hashBytes) (cr.maskingNonce <> "CredentialResponsePad"))
+    plain <- lift (xorWith pad cr.maskedResponse)
+    let (serverPk, rest) = BS.splitAt elementBytes plain
+        (n, tag) = BS.splitAt nonceBytes rest
+    clientSk <- alloc s scalarBytes
+    export <- alloc s hashBytes
+    (_, sid, cidentity) <- recover s rwd serverPk (Envelope n tag) ids clientSk export
+    -- The envelope's MAC covers the server's key, so a key that passes it was
+    -- registered; it is checked all the same before it is used.
+    _ <- ExceptT (pure (element serverPk))
+    -- AuthClientFinalize
+    ikm <- alloc s (3 * elementBytes)
+    need DeserializeError (withElement ke2.serverPublicKeyshare (scalarMultInto ikm clientSecret))
+    need DeserializeError (withElement serverPk (scalarMultInto (ikm `plusPtr` elementBytes) clientSecret))
+    need DeserializeError (withElement ke2.serverPublicKeyshare (scalarMultInto (ikm `plusPtr` (2 * elementBytes)) clientSk))
+    let pre = preamble config.context cidentity st.ke1 sid cr ke2.serverNonce ke2.serverPublicKeyshare
+    (km2, km3, sessionKey) <- deriveKeys s ikm pre
+    expected <- alloc s hashBytes
+    lift (hmacSha512Into expected (Mem km2 hashBytes) [Pub (sha512 [pre])])
+    need ServerAuthenticationError (equalTo ke2.serverMac expected hashBytes)
+    -- The server's MAC is the one expected, so the transcript MACed next
+    -- can take it as sent.
+    clientMac <- lift (publicBytes hashBytes (\o -> hmacSha512Into o (Mem km3 hashBytes) [Pub (sha512 [pre, ke2.serverMac])]))
+    key <- lift (secretFromPtr sessionKey hashBytes)
+    exportKey <- lift (secretFromPtr export hashBytes)
+    pure (KE3 clientMac, SessionKey key, ExportKey exportKey)
 
 -- | 'serverFinish' is ServerFinish: the server compares the client's MAC
 -- with the one it expects, and releases the session key only when they
 -- match.
 serverFinish :: ServerLoginState -> KE3 -> Either Error SessionKey
-serverFinish st ke3
-  | constantTimeEqual ke3.clientMac st.expectedClientMac = Right (SessionKey st.sessionKey)
-  | otherwise = Left ClientAuthenticationError
+serverFinish st ke3 = pureStep . withSecret st.secret $ \p -> do
+  ok <- equalTo ke3.clientMac p hashBytes
+  if ok
+    then Right . SessionKey <$> secretFromPtr (p `plusPtr` hashBytes) hashBytes
+    else pure (Left ClientAuthenticationError)
 
 -- | Preamble: the transcript both parties MAC, with the context, the
--- identities and every message of the exchange.
+-- identities and every message of the exchange. It is public.
 preamble :: ByteString -> ByteString -> KE1 -> ByteString -> CredentialResponse -> ByteString -> ByteString -> ByteString
 preamble ctx clientIdentity ke1 serverIdentity cr sn serverShare =
   BS.concat
@@ -710,31 +980,36 @@ preamble ctx clientIdentity ke1 serverIdentity cr sn serverShare =
     ]
 
 -- | DeriveKeys: the server's MAC key, the client's MAC key and the session
--- key, from the Diffie-Hellman products and the transcript, through TLS
--- 1.3's Expand-Label under the label prefix @"OPAQUE-"@.
-deriveKeys :: ByteString -> ByteString -> (ByteString, ByteString, ByteString)
-deriveKeys ikm pre = (km2, km3, sessionKey)
-  where
-    prk = hkdfExtract "" ikm
-    transcript = sha512 [pre]
-    handshake = deriveSecret prk "HandshakeSecret" transcript
-    sessionKey = deriveSecret prk "SessionKey" transcript
-    km2 = deriveSecret handshake "ServerMAC" ""
-    km3 = deriveSecret handshake "ClientMAC" ""
+-- key, written into the scratch buffer, from the Diffie-Hellman products
+-- (96 bytes at @ikm@) and the transcript, through TLS 1.3's Expand-Label
+-- under the label prefix @"OPAQUE-"@.
+deriveKeys :: Scratch -> Ptr Word8 -> ByteString -> Op (Ptr Word8, Ptr Word8, Ptr Word8)
+deriveKeys s ikm pre = do
+  prk <- alloc s hashBytes
+  handshake <- alloc s hashBytes
+  sessionKey <- alloc s hashBytes
+  km2 <- alloc s hashBytes
+  km3 <- alloc s hashBytes
+  lift $ do
+    hkdfExtractInto prk "" ikm (3 * elementBytes)
+    let transcript = sha512 [pre]
+    expandLabelInto handshake prk "HandshakeSecret" transcript
+    expandLabelInto sessionKey prk "SessionKey" transcript
+    expandLabelInto km2 handshake "ServerMAC" ""
+    expandLabelInto km3 handshake "ClientMAC" ""
+  pure (km2, km3, sessionKey)
 
--- | Derive-Secret: Expand-Label with the output length of the hash.
-deriveSecret :: ByteString -> ByteString -> ByteString -> ByteString
-deriveSecret secret label ctx = expandLabel secret label ctx hashBytes
-
--- | Expand-Label: HKDF-Expand with TLS 1.3's encoded label as the info.
-expandLabel :: ByteString -> ByteString -> ByteString -> Int -> ByteString
-expandLabel secret label ctx len =
-  hkdfExpand secret customLabel len
+-- | Derive-Secret: Expand-Label with the output length of the hash, from
+-- the secret (64 bytes at @secret@) to 64 bytes at @out@. Expand-Label is
+-- HKDF-Expand with TLS 1.3's encoded label as the info.
+expandLabelInto :: Ptr Word8 -> Ptr Word8 -> ByteString -> ByteString -> IO ()
+expandLabelInto out secret label ctx =
+  hkdfExpandInto out hashBytes (Mem secret hashBytes) customLabel
   where
     fullLabel = "OPAQUE-" <> label
     customLabel =
       BS.concat
-        [ i2osp 2 len
+        [ i2osp 2 hashBytes
         , i2osp 1 (BS.length fullLabel)
         , fullLabel
         , i2osp 1 (BS.length ctx)
