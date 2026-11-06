@@ -12,7 +12,8 @@ import Crypto.OPAQUE.Internal
 import Crypto.OPAQUE.OPRF qualified as OPRF
 import Crypto.OPAQUE.Sodium (scalarMultBase)
 import Data.ByteString (ByteString)
-import Data.ByteString.Base16 qualified as Base16
+import Data.ByteString qualified as BS
+import Data.Char (digitToInt, isHexDigit)
 import Data.Maybe (fromMaybe)
 import Test.Hspec
 
@@ -22,10 +23,14 @@ type Vector = [(String, ByteString)]
 -- | The value a vector names, decoded from hexadecimal. A name that is not
 -- in the vector is a mistake in the test, and stops it.
 at :: Vector -> String -> ByteString
-at v name =
-  either (error . (("bad hex for " <> name <> ": ") <>)) id
-    . Base16.decode
-    $ fromMaybe (error ("no " <> name <> " in the vector")) (lookup name v)
+at v name = unhex (fromMaybe (error ("no " <> name <> " in the vector")) (lookup name v))
+  where
+    unhex hex
+      | BS.null hex = BS.empty
+      | BS.length hex >= 2 && BS.all (isHexDigit . toEnum . fromIntegral) (BS.take 2 hex) =
+          let digit i = fromIntegral (digitToInt (toEnum (fromIntegral (BS.index hex i))))
+           in BS.cons (digit 0 * 16 + digit 1) (unhex (BS.drop 2 hex))
+      | otherwise = error ("bad hex for " <> name)
 
 -- | Whether a vector names a value.
 has :: Vector -> String -> Bool
