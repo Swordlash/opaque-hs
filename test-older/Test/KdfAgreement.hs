@@ -8,6 +8,6 @@ import Test.Hspec
 
 spec :: Spec
 spec =
-  describe ("the HKDF polyfill against libsodium's (this build uses " <> Kdf.implementation <> ")") $
-    it "is compared only in builds without older-libsodium" $
-      pendingWith "built with older-libsodium: libsodium's HKDF is not linked"
+  describe ("the HKDF polyfill against libsodium's (this build uses " <> Kdf.implementation <> ")")
+    $ it "is compared only in builds without older-libsodium"
+    $ pendingWith "built with older-libsodium: libsodium's HKDF is not linked"
