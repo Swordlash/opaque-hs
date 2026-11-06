@@ -220,9 +220,12 @@ scalarReduce wide
 -- | 'scalarInvert' is the inverse of a scalar modulo the group's order, or
 -- 'Nothing' for zero.
 scalarInvert :: ByteString -> Maybe ByteString
-scalarInvert s = unsafeDupablePerformIO . sodium $
-  withBytes s $
-    \i _ -> freshOr scalarBytes (`c_scalar_invert` i)
+scalarInvert s
+  | BS.length s /= scalarBytes = Nothing
+  | otherwise =
+      unsafeDupablePerformIO . sodium $
+        withBytes s $
+          \i _ -> freshOr scalarBytes (`c_scalar_invert` i)
 
 -- | 'scalarMult' multiplies an encoded element by a scalar. It is
 -- 'Nothing' when the element's encoding is not valid or the product is the

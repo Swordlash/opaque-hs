@@ -58,9 +58,13 @@ test-suite opaque-test
   main-is:          Test.hs
   other-modules:
       Test.Vectors
+      Test.Kdf
       Test.RoundTrip
+      Test.Hardening
+      Test.Properties
   build-depends:
       base,
       bytestring,
       hspec >= 2.10 && < 2.12,
+      QuickCheck >= 2.14 && < 2.20,
       opaque

@@ -26,6 +26,7 @@ module Crypto.OPAQUE.OPRF
   )
 where
 
+import Control.Monad (guard)
 import Crypto.OPAQUE.Kdf (expandMessageXmd, i2osp)
 import Crypto.OPAQUE.Sodium
 import Data.ByteString (ByteString)
@@ -74,6 +75,7 @@ blind input = (`blindWith` input) <$> randomScalar
 -- | 'blindWith' is 'blind' with the blind given, for test vectors.
 blindWith :: ByteString -> ByteString -> Maybe (ByteString, ByteString)
 blindWith r input = do
+  guard (fitting input)
   blinded <- scalarMult r (hashToGroup input)
   pure (r, blinded)
 
@@ -89,6 +91,7 @@ blindEvaluate = scalarMult
 -- valid.
 finalize :: ByteString -> ByteString -> ByteString -> Maybe ByteString
 finalize input r evaluated = do
+  guard (fitting input)
   inverse <- scalarInvert r
   unblinded <- scalarMult inverse evaluated
   pure (finalHash input unblinded)
@@ -96,7 +99,14 @@ finalize input r evaluated = do
 -- | 'evaluate' is RFC 9497's Evaluate: the same output as the protocol,
 -- computed by someone who knows both the key and the input.
 evaluate :: ByteString -> ByteString -> Maybe ByteString
-evaluate sk input = finalHash input <$> scalarMult sk (hashToGroup input)
+evaluate sk input = do
+  guard (fitting input)
+  finalHash input <$> scalarMult sk (hashToGroup input)
+
+-- | Whether an input is one RFC 9497 takes (section 5.1): smaller than
+-- 65535 bytes, so that its two-byte length in Finalize's hash cannot wrap.
+fitting :: ByteString -> Bool
+fitting input = BS.length input < 65535
 
 -- | The hash that ends Finalize and Evaluate.
 finalHash :: ByteString -> ByteString -> ByteString

@@ -3,9 +3,13 @@
 --
 -- HKDF (RFC 5869) and @expand_message_xmd@ (RFC 9380, section 5.3.1) are
 -- not primitives: each is a few lines of concatenation and calls to a hash
--- or a MAC. libsodium 1.0.18, the oldest this package supports, has no
--- HKDF-SHA-512 of its own, so both are written here, over 'hmacSha512' and
--- 'sha512'.
+-- or a MAC. They are written here, over 'hmacSha512' and 'sha512', because
+-- libsodium 1.0.18, the oldest this package supports (the one the build
+-- machines' distribution packages), has neither: @crypto_kdf_hkdf_sha512_*@
+-- came in 1.0.19, and libsodium has no @expand_message_xmd@ with SHA-512.
+-- The tests check both against published known-answer vectors: RFC 9380's
+-- appendix K.3 for @expand_message_xmd@, and HKDF-SHA-512 outputs computed
+-- independently with OpenSSL (through Node's @crypto.hkdfSync@).
 module Crypto.OPAQUE.Kdf
   ( hkdfExtract
   , hkdfExpand
@@ -20,8 +24,9 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 
 -- | 'i2osp' writes a non-negative integer as @n@ big-endian bytes: the
--- RFCs' I2OSP. It is used only for lengths and counters, which the callers
--- keep in range.
+-- RFCs' I2OSP. It is used only for lengths and counters. It keeps the low
+-- @n@ bytes of a larger integer, so every caller refuses inputs whose length
+-- does not fit before it gets here.
 i2osp :: Int -> Int -> ByteString
 i2osp n x = BS.pack [fromIntegral (x `shiftR` (8 * i)) | i <- [n - 1, n - 2 .. 0]]
 

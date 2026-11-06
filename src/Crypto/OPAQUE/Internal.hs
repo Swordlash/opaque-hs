@@ -64,13 +64,14 @@ module Crypto.OPAQUE.Internal
   )
 where
 
+import Control.Monad (when)
 import Crypto.OPAQUE.Kdf (hkdfExpand, hkdfExtract, i2osp)
 import Crypto.OPAQUE.OPRF qualified as OPRF
 import Crypto.OPAQUE.Sodium
 import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Word (Word64)
 
 -- | 'Config' is what both parties must agree on beyond the suite.
@@ -129,9 +130,16 @@ data Error
   = -- | A message's bytes have the wrong length or hold an invalid group
     -- element.
     DeserializeError
-  | -- | The password is too long (65535 bytes or more), or hashes to the
-    -- group's identity (negligible probability).
+  | -- | The password is too long (65535 bytes or more, RFC 9497's bound on
+    -- an OPRF's input), an identity or the context is longer than its
+    -- two-byte length can say (65536 bytes or more), a blind is zero, or
+    -- the password hashes to the group's identity (negligible probability).
     InvalidInputError
+  | -- | The server's evaluated element is the client's own blinded element
+    -- sent back: a server that reflects the OPRF instead of evaluating it.
+    -- RFC 9807 does not require the check; opaque-ke makes it, and so does
+    -- this package.
+    ReflectedValueError
   | -- | A key pair could not be derived from a seed (negligible probability).
     DeriveKeyPairError
   | -- | The key stretching function failed: Argon2id's limits are out of
@@ -298,17 +306,23 @@ instance Encoding KE3 where
   decode bs = KE3 <$> (fields [hashBytes] bs >> pure bs)
 
 -- | 'ClientRegState' is what the client keeps between its registration
--- request and the server's response: the password and the OPRF's blind.
+-- request and the server's response: the password, the OPRF's blind, and
+-- the blinded element it sent, to refuse it back as the evaluated one.
 data ClientRegState = ClientRegState
   { password :: ByteString
   , blind :: ByteString
+  , blinded :: ByteString
   }
 
 instance Encoding ClientRegState where
-  encode s = s.blind <> s.password
+  encode s = s.blind <> s.blinded <> s.password
   decode bs
-    | BS.length bs < scalarBytes = Left DeserializeError
-    | otherwise = let (b, p) = BS.splitAt scalarBytes bs in Right (ClientRegState p b)
+    | BS.length bs < scalarBytes + elementBytes = Left DeserializeError
+    | otherwise = do
+        let (b, rest) = BS.splitAt scalarBytes bs
+            (e, p) = BS.splitAt elementBytes rest
+        e' <- element e
+        pure (ClientRegState p b e')
 
 -- | 'ClientLoginState' is what the client keeps between KE1 and KE2: the
 -- password, the OPRF's blind, the ephemeral private key and KE1 itself.
@@ -454,12 +468,20 @@ randomizedPassword k oprfOutput = do
   stretched <- stretch k oprfOutput
   pure (hkdfExtract "" (oprfOutput <> stretched))
 
--- | Blind the password, checking its length (RFC 9497 bounds inputs to
--- fewer than 65535 bytes).
+-- | Blind the password, checking its length (RFC 9497, section 5.1: an
+-- input is smaller than 65535 bytes). A zero blind is refused: its
+-- blinded element would be the identity.
 blindPassword :: ByteString -> ByteString -> Either Error (ByteString, ByteString)
 blindPassword r password
   | BS.length password >= 65535 = Left InvalidInputError
   | otherwise = maybe (Left InvalidInputError) Right (OPRF.blindWith r password)
+
+-- | Check that the context and the identities fit their two-byte lengths
+-- (RFC 9807's @\<1..2^16-1>@), so that no length wraps silently.
+checkLengths :: Config -> Identities -> Either Error ()
+checkLengths config ids
+  | any ((> 65535) . BS.length) (config.context : catMaybes [ids.client, ids.server]) = Left InvalidInputError
+  | otherwise = Right ()
 
 -- | 'registrationRequest' is CreateRegistrationRequest: the client blinds
 -- its password with a random scalar, keeps the blind and sends the blinded
@@ -471,7 +493,7 @@ registrationRequest password = (`registrationRequestWith` password) <$> randomSc
 registrationRequestWith :: ByteString -> ByteString -> Either Error (ClientRegState, RegistrationRequest)
 registrationRequestWith r password = do
   (b, blinded) <- blindPassword r password
-  pure (ClientRegState {password, blind = b}, RegistrationRequest blinded)
+  pure (ClientRegState {password, blind = b, blinded}, RegistrationRequest blinded)
 
 -- | 'registrationResponse' is CreateRegistrationResponse: the server derives
 -- the client's OPRF key from its seed and the credential identifier,
@@ -496,6 +518,9 @@ finalizeRegistration config st response ids = do
 -- nonce given.
 finalizeRegistrationWith :: Config -> ByteString -> ClientRegState -> RegistrationResponse -> Identities -> Either Error (RegistrationRecord, ExportKey)
 finalizeRegistrationWith config envelopeNonce st response ids = do
+  checkLengths config ids
+  when (response.evaluatedMessage == st.blinded) (Left ReflectedValueError)
+  _ <- element response.serverPublicKey
   oprfOutput <- maybe (Left DeserializeError) Right (OPRF.finalize st.password st.blind response.evaluatedMessage)
   rwd <- randomizedPassword config.ksf oprfOutput
   let maskingKey = hkdfExpand rwd "MaskingKey" hashBytes
@@ -591,6 +616,7 @@ serverRespond config setup record cid ke1 ids = do
 -- values given.
 serverRespondWith :: Config -> ServerSetup -> RegistrationRecord -> CredentialId -> ServerRandom -> KE1 -> Identities -> Either Error (ServerLoginState, KE2)
 serverRespondWith config setup record cid rnd ke1 ids = do
+  checkLengths config ids
   -- CreateCredentialResponse
   k <- oprfKey setup cid
   evaluated <- maybe (Left DeserializeError) Right (OPRF.blindEvaluate k ke1.blindedMessage)
@@ -629,8 +655,10 @@ serverRespondWith config setup record cid rnd ke1 ids = do
 -- key and the export key.
 clientFinish :: Config -> ClientLoginState -> KE2 -> Identities -> Either Error (KE3, SessionKey, ExportKey)
 clientFinish config st ke2 ids = do
+  checkLengths config ids
   -- RecoverCredentials
   let cr = ke2.credentialResponse
+  when (cr.evaluatedMessage == st.ke1.blindedMessage) (Left ReflectedValueError)
   oprfOutput <- maybe (Left DeserializeError) Right (OPRF.finalize st.password st.blind cr.evaluatedMessage)
   rwd <- randomizedPassword config.ksf oprfOutput
   let maskingKey = hkdfExpand rwd "MaskingKey" hashBytes
@@ -639,6 +667,9 @@ clientFinish config st ke2 ids = do
       (serverPk, rest) = BS.splitAt elementBytes plain
       (n, tag) = BS.splitAt nonceBytes rest
   (clientSk, (_, sid, cidentity), exportKey) <- recover rwd serverPk (Envelope n tag) ids
+  -- The envelope's MAC covers the server's key, so a key that passes it was
+  -- registered; it is checked all the same before it is used.
+  _ <- element serverPk
   -- AuthClientFinalize
   dh1 <- diffieHellman st.clientSecret ke2.serverPublicKeyshare
   dh2 <- diffieHellman st.clientSecret serverPk
