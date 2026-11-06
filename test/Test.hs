@@ -1,11 +1,13 @@
 -- | The opaque package's tests: the RFCs' test vectors, known-answer tests
 -- of the key derivations, round trips with real random values, the cases
 -- other implementations test beyond the vectors, QuickCheck properties, and
--- the memory secrets are kept in.
+-- the memory secrets are kept in, and interoperability with
+-- @serenity-kit/opaque@, the wiki's browser client.
 module Main (main) where
 
 import Test.Hardening qualified
 import Test.Hspec
+import Test.Interop qualified
 import Test.Kdf qualified
 import Test.KdfAgreement qualified
 import Test.Memory qualified
@@ -22,3 +24,4 @@ main = hspec $ do
   describe "Test.Hardening" Test.Hardening.spec
   describe "Test.Properties" Test.Properties.spec
   describe "Test.Memory" Test.Memory.spec
+  describe "Test.Interop" Test.Interop.spec

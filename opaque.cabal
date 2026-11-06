@@ -18,6 +18,7 @@ category:           Cryptography
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
                     README.md
+extra-source-files: interop/serenity.mjs
 tested-with:        GHC == 9.10.3, GHC == 9.14.1
 
 flag older-libsodium
@@ -81,6 +82,7 @@ test-suite opaque-test
       Test.Hardening
       Test.Properties
       Test.Memory
+      Test.Interop
       Test.KdfAgreement
   if arch(wasm32)
     buildable: False
@@ -95,4 +97,8 @@ test-suite opaque-test
       bytestring,
       hspec >= 2.10 && < 2.12,
       QuickCheck >= 2.14 && < 2.20,
+      base64-bytestring >= 1.2 && < 1.3,
+      directory,
+      process,
+      text,
       opaque
