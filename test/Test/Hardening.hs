@@ -160,19 +160,19 @@ spec = do
 
   describe "the two-byte lengths" $ do
     let setup = setupOf 6
-    it "take a password of 65535 bytes, through a whole login, and refuse one of 65536" $ do
-      let long = BS.replicate 65535 0x61
+    it "take a password of 65534 bytes, through a whole login, and refuse one of 65535 (RFC 9497, 5.1)" $ do
+      let long = BS.replicate 65534 0x61
       (record, _) <- ok (registered quick setup defaultIdentities long)
       ((sst, _), finished) <- ok (loginWith quick setup record defaultIdentities defaultIdentities 7 long)
       (ke3, _, _) <- ok finished
       fmap (const ()) (serverFinish sst ke3) `shouldBe` Right ()
-      fmap (const ()) (registrationRequestWith (scalar 1) (BS.replicate 65536 0x61)) `shouldBe` Left InvalidInputError
-      fmap (const ()) (clientStartWith (scalar 1) (BS.replicate 32 1) (BS.replicate 32 2) (BS.replicate 65536 0x61)) `shouldBe` Left InvalidInputError
-    it "take an OPRF input of 65535 bytes and refuse one of 65536" $ do
+      fmap (const ()) (registrationRequestWith (scalar 1) (BS.replicate 65535 0x61)) `shouldBe` Left InvalidInputError
+      fmap (const ()) (clientStartWith (scalar 1) (BS.replicate 32 1) (BS.replicate 32 2) (BS.replicate 65535 0x61)) `shouldBe` Left InvalidInputError
+    it "take an OPRF input of 65534 bytes and refuse one of 65535" $ do
       let k = scalar 3
-      fmap (const ()) (OPRF.evaluate k (BS.replicate 65535 0)) `shouldBe` Just ()
-      OPRF.evaluate k (BS.replicate 65536 0) `shouldBe` Nothing
-      OPRF.blindWith (scalar 4) (BS.replicate 65536 0) `shouldBe` Nothing
+      fmap (const ()) (OPRF.evaluate k (BS.replicate 65534 0)) `shouldBe` Just ()
+      OPRF.evaluate k (BS.replicate 65535 0) `shouldBe` Nothing
+      OPRF.blindWith (scalar 4) (BS.replicate 65535 0) `shouldBe` Nothing
     it "take an identity and a context of 65535 bytes, and refuse 65536" $ do
       let big n = BS.replicate n 0x62
           ids n = Identities {client = Just (big n), server = Just (big n)}

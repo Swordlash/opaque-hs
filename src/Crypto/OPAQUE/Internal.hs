@@ -151,8 +151,9 @@ data Error
   = -- | A message's bytes have the wrong length or hold an invalid group
     -- element.
     DeserializeError
-  | -- | The password, an identity or the context is longer than its
-    -- two-byte length can say (65536 bytes or more), a random value given
+  | -- | The password is 65535 bytes or more (RFC 9497, section 5.1), an
+    -- identity or the context is longer than its two-byte length can say
+    -- (65536 bytes or more), a random value given
     -- has the wrong length, a blind is zero, or the password hashes to the
     -- group's identity (negligible probability).
     InvalidInputError

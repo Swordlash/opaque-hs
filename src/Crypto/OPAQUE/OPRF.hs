@@ -54,10 +54,11 @@ import System.IO.Unsafe (unsafePerformIO)
 contextString :: ByteString
 contextString = "OPRFV1-" <> BS.singleton 0 <> "-ristretto255-SHA512"
 
--- | The longest input this package takes: 65535 bytes, the most the
--- two-byte length in Finalize's hash can say, so that it cannot wrap.
+-- | The longest input this package takes: 65534 bytes. RFC 9497, section
+-- 5.1, says an input "MUST be smaller than 2^16 - 1 bytes"; the two-byte
+-- length in Finalize's hash could say 65535, but the RFC keeps one below.
 maxInputBytes :: Int
-maxInputBytes = 65535
+maxInputBytes = 65534
 
 -- | 'hashToGroupInto' maps the input to a group element, 32 bytes at
 -- @out@: @hash_to_ristretto255@ of RFC 9380, with the domain separation tag
