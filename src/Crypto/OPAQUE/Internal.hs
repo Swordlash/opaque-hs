@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 -- | The OPAQUE protocol of RFC 9807 with the 3DH key exchange, over
 -- ristretto255 and SHA-512, with every random value a parameter.
 --
@@ -33,11 +35,17 @@ module Crypto.OPAQUE.Internal
     -- * Messages, records and states
   , RegistrationRequest (..)
   , RegistrationResponse (..)
+  , registrationResponseOf
   , Envelope (..)
+  , envelopeOf
   , RegistrationRecord (..)
+  , registrationRecordOf
   , CredentialResponse (..)
+  , credentialResponseOf
   , KE1 (..)
+  , ke1Of
   , KE2 (..)
+  , ke2Of
   , KE3 (..)
   , ClientRegState (..)
   , ClientLoginState (..)
@@ -93,6 +101,7 @@ import Data.Word (Word64, Word8)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peekByteOff, pokeByteOff)
+import GHC.Records (HasField (..))
 import System.IO.Unsafe (unsafePerformIO)
 
 -- | 'Config' is what both parties must agree on beyond the suite.
@@ -191,15 +200,29 @@ nonceBytes, seedBytes :: Int
 nonceBytes = 32
 seedBytes = 32
 
--- | Split bytes into fields of the given lengths, or fail when the total is
--- not the input's length.
-fields :: [Int] -> ByteString -> Either Error [ByteString]
-fields sizes bs
-  | sum sizes /= BS.length bs = Left DeserializeError
-  | otherwise = Right (go sizes bs)
-  where
-    go [] _ = []
-    go (n : ns) rest = let (a, b) = BS.splitAt n rest in a : go ns b
+-- Messages and records are newtypes over their encoding: the RFC's
+-- fixed-length fields one after another. 'encode' gives the bytes back as
+-- they are, and 'decode' checks the length and the group elements once and
+-- keeps the input whole. Each field is a 'HasField' instance that slices
+-- the bytes at the field's offset, so @ke1.clientNonce@ reads as a record
+-- field would, without a copy. A value comes only from 'decode' or from
+-- the type's constructor function below (@ke1Of@ and the like), which
+-- concatenates parts of the right lengths in one allocation, so every
+-- slice is in range.
+
+-- | The bytes of a field: @len@ bytes at @offset@, sharing the message's
+-- buffer. A slice keeps the whole buffer alive, which for messages of a
+-- few hundred bytes costs nothing worth a copy.
+slice :: Int -> Int -> ByteString -> ByteString
+slice offset len = BS.take len . BS.drop offset
+
+-- | Bytes as 'decode' accepts a message: exactly @size@ of them, with a
+-- valid group element at each of the given offsets.
+checked :: Int -> [Int] -> ByteString -> Either Error ByteString
+checked size elementsAt bs
+  | BS.length bs /= size = Left DeserializeError
+  | all (\o -> isValidElement (slice o elementBytes bs)) elementsAt = Right bs
+  | otherwise = Left DeserializeError
 
 -- | Accept only a valid group element other than the identity.
 element :: ByteString -> Either Error ByteString
@@ -215,108 +238,168 @@ instance Encoding RegistrationRequest where
   decode bs = RegistrationRequest <$> element bs
 
 -- | 'RegistrationResponse' is the server's answer to a registration request:
--- the OPRF evaluated under the client's key, and the server's public key.
-data RegistrationResponse = RegistrationResponse
-  { evaluatedMessage :: ByteString
-  , serverPublicKey :: ByteString
-  }
+-- the OPRF evaluated under the client's key (@evaluatedMessage@), and the
+-- server's public key (@serverPublicKey@).
+newtype RegistrationResponse = RegistrationResponse ByteString
   deriving stock (Eq, Show)
+
+-- | A registration response of its evaluated element and the server's
+-- public key.
+registrationResponseOf :: ByteString -> ByteString -> RegistrationResponse
+registrationResponseOf evaluated pk = RegistrationResponse (BS.concat [evaluated, pk])
+
+instance HasField "evaluatedMessage" RegistrationResponse ByteString where
+  getField (RegistrationResponse b) = slice 0 elementBytes b
+
+instance HasField "serverPublicKey" RegistrationResponse ByteString where
+  getField (RegistrationResponse b) = slice elementBytes elementBytes b
 
 instance Encoding RegistrationResponse where
-  encode r = r.evaluatedMessage <> r.serverPublicKey
-  decode bs =
-    fields [elementBytes, elementBytes] bs >>= \case
-      [e, pk] -> RegistrationResponse <$> element e <*> element pk
-      _ -> Left DeserializeError
+  encode (RegistrationResponse b) = b
+  decode bs = RegistrationResponse <$> checked (2 * elementBytes) [0, elementBytes] bs
 
 -- | 'Envelope' is what lets the client recover its private key at login: a
--- random nonce, and a MAC over the nonce and the parties' public keys and
--- identities, keyed by a key only the right password leads to.
-data Envelope = Envelope
-  { nonce :: ByteString
-  , authTag :: ByteString
-  }
+-- random nonce (@nonce@), and a MAC (@authTag@) over the nonce and the
+-- parties' public keys and identities, keyed by a key only the right
+-- password leads to.
+newtype Envelope = Envelope ByteString
   deriving stock (Eq, Show)
+
+-- | The length of an envelope: a nonce and a MAC.
+envelopeBytes :: Int
+envelopeBytes = nonceBytes + hashBytes
+
+-- | An envelope of its nonce and its MAC.
+envelopeOf :: ByteString -> ByteString -> Envelope
+envelopeOf n tag = Envelope (BS.concat [n, tag])
+
+instance HasField "nonce" Envelope ByteString where
+  getField (Envelope b) = slice 0 nonceBytes b
+
+instance HasField "authTag" Envelope ByteString where
+  getField (Envelope b) = slice nonceBytes hashBytes b
 
 -- | 'RegistrationRecord' is what the server keeps for a client: the
--- client's public key, the key that masks the login's answer, and the
--- envelope. Nothing in it lets the server, or a thief of the server's
--- data, test a guess of the password without the server's OPRF seed.
-data RegistrationRecord = RegistrationRecord
-  { clientPublicKey :: ByteString
-  , maskingKey :: ByteString
-  , envelope :: Envelope
-  }
+-- client's public key (@clientPublicKey@), the key that masks the login's
+-- answer (@maskingKey@), and the envelope (@envelope@). Nothing in it lets
+-- the server, or a thief of the server's data, test a guess of the
+-- password without the server's OPRF seed.
+newtype RegistrationRecord = RegistrationRecord ByteString
   deriving stock (Eq, Show)
 
-instance Encoding RegistrationRecord where
-  encode r = r.clientPublicKey <> r.maskingKey <> r.envelope.nonce <> r.envelope.authTag
-  decode bs =
-    fields [elementBytes, hashBytes, nonceBytes, hashBytes] bs >>= \case
-      [pk, mk, n, tag] -> do
-        pk' <- element pk
-        pure RegistrationRecord {clientPublicKey = pk', maskingKey = mk, envelope = Envelope n tag}
-      _ -> Left DeserializeError
+-- | The length of a record: a public key, a masking key and an envelope.
+recordBytes :: Int
+recordBytes = elementBytes + hashBytes + envelopeBytes
 
--- | 'CredentialResponse' is the OPRF half of KE2: the evaluated element, and
--- the server's public key and the client's envelope, encrypted under a pad
--- derived from the record's masking key.
-data CredentialResponse = CredentialResponse
-  { evaluatedMessage :: ByteString
-  , maskingNonce :: ByteString
-  , maskedResponse :: ByteString
-  }
+-- | A record of the client's public key, the masking key and the envelope.
+registrationRecordOf :: ByteString -> ByteString -> Envelope -> RegistrationRecord
+registrationRecordOf pk mask (Envelope env) = RegistrationRecord (BS.concat [pk, mask, env])
+
+instance HasField "clientPublicKey" RegistrationRecord ByteString where
+  getField (RegistrationRecord b) = slice 0 elementBytes b
+
+instance HasField "maskingKey" RegistrationRecord ByteString where
+  getField (RegistrationRecord b) = slice elementBytes hashBytes b
+
+instance HasField "envelope" RegistrationRecord Envelope where
+  getField (RegistrationRecord b) = Envelope (slice (elementBytes + hashBytes) envelopeBytes b)
+
+instance Encoding RegistrationRecord where
+  encode (RegistrationRecord b) = b
+  decode bs = RegistrationRecord <$> checked recordBytes [0] bs
+
+-- | 'CredentialResponse' is the OPRF half of KE2: the evaluated element
+-- (@evaluatedMessage@), and the server's public key and the client's
+-- envelope, encrypted (@maskedResponse@) under a pad derived from the
+-- record's masking key and a nonce (@maskingNonce@).
+newtype CredentialResponse = CredentialResponse ByteString
   deriving stock (Eq, Show)
 
 -- | The length of a masked response: a public key, a nonce and a MAC.
 maskedBytes :: Int
 maskedBytes = elementBytes + nonceBytes + hashBytes
 
+-- | The length of a credential response: an element, a nonce and a masked
+-- response.
+credentialResponseBytes :: Int
+credentialResponseBytes = elementBytes + nonceBytes + maskedBytes
+
+-- | A credential response of its evaluated element, its masking nonce and
+-- its masked response.
+credentialResponseOf :: ByteString -> ByteString -> ByteString -> CredentialResponse
+credentialResponseOf evaluated mn masked = CredentialResponse (BS.concat [evaluated, mn, masked])
+
+-- | A credential response's bytes, as KE2 and the transcript carry them.
 encodeCredentialResponse :: CredentialResponse -> ByteString
-encodeCredentialResponse c = c.evaluatedMessage <> c.maskingNonce <> c.maskedResponse
+encodeCredentialResponse (CredentialResponse b) = b
+
+instance HasField "evaluatedMessage" CredentialResponse ByteString where
+  getField (CredentialResponse b) = slice 0 elementBytes b
+
+instance HasField "maskingNonce" CredentialResponse ByteString where
+  getField (CredentialResponse b) = slice elementBytes nonceBytes b
+
+instance HasField "maskedResponse" CredentialResponse ByteString where
+  getField (CredentialResponse b) = slice (elementBytes + nonceBytes) maskedBytes b
 
 -- | 'KE1' is the client's first login message: the blinded password (the
--- credential request), a nonce, and the client's ephemeral public key.
-data KE1 = KE1
-  { blindedMessage :: ByteString
-  , clientNonce :: ByteString
-  , clientPublicKeyshare :: ByteString
-  }
+-- credential request, @blindedMessage@), a nonce (@clientNonce@), and the
+-- client's ephemeral public key (@clientPublicKeyshare@).
+newtype KE1 = KE1 ByteString
   deriving stock (Eq, Show)
+
+-- | The length of KE1: two elements and a nonce.
+ke1Bytes :: Int
+ke1Bytes = 2 * elementBytes + nonceBytes
+
+-- | KE1 of its blinded element, its nonce and the ephemeral public key.
+ke1Of :: ByteString -> ByteString -> ByteString -> KE1
+ke1Of blinded n share = KE1 (BS.concat [blinded, n, share])
+
+instance HasField "blindedMessage" KE1 ByteString where
+  getField (KE1 b) = slice 0 elementBytes b
+
+instance HasField "clientNonce" KE1 ByteString where
+  getField (KE1 b) = slice elementBytes nonceBytes b
+
+instance HasField "clientPublicKeyshare" KE1 ByteString where
+  getField (KE1 b) = slice (elementBytes + nonceBytes) elementBytes b
 
 instance Encoding KE1 where
-  encode k = k.blindedMessage <> k.clientNonce <> k.clientPublicKeyshare
-  decode bs =
-    fields [elementBytes, nonceBytes, elementBytes] bs >>= \case
-      [b, n, ks] -> KE1 <$> element b <*> pure n <*> element ks
-      _ -> Left DeserializeError
+  encode (KE1 b) = b
+  decode bs = KE1 <$> checked ke1Bytes [0, elementBytes + nonceBytes] bs
 
--- | 'KE2' is the server's login message: the credential response, a nonce,
--- the server's ephemeral public key, and a MAC that proves the server knows
--- its private key and the client's record.
-data KE2 = KE2
-  { credentialResponse :: CredentialResponse
-  , serverNonce :: ByteString
-  , serverPublicKeyshare :: ByteString
-  , serverMac :: ByteString
-  }
+-- | 'KE2' is the server's login message: the credential response
+-- (@credentialResponse@), a nonce (@serverNonce@), the server's ephemeral
+-- public key (@serverPublicKeyshare@), and a MAC (@serverMac@) that proves
+-- the server knows its private key and the client's record.
+newtype KE2 = KE2 ByteString
   deriving stock (Eq, Show)
 
+-- | The length of KE2: a credential response, a nonce, an element and a MAC.
+ke2Bytes :: Int
+ke2Bytes = credentialResponseBytes + nonceBytes + elementBytes + hashBytes
+
+-- | KE2 of its credential response, the server's nonce, the ephemeral
+-- public key and the MAC.
+ke2Of :: CredentialResponse -> ByteString -> ByteString -> ByteString -> KE2
+ke2Of (CredentialResponse cr) n share mac = KE2 (BS.concat [cr, n, share, mac])
+
+instance HasField "credentialResponse" KE2 CredentialResponse where
+  getField (KE2 b) = CredentialResponse (slice 0 credentialResponseBytes b)
+
+instance HasField "serverNonce" KE2 ByteString where
+  getField (KE2 b) = slice credentialResponseBytes nonceBytes b
+
+instance HasField "serverPublicKeyshare" KE2 ByteString where
+  getField (KE2 b) = slice (credentialResponseBytes + nonceBytes) elementBytes b
+
+instance HasField "serverMac" KE2 ByteString where
+  getField (KE2 b) = slice (credentialResponseBytes + nonceBytes + elementBytes) hashBytes b
+
 instance Encoding KE2 where
-  encode k = encodeCredentialResponse k.credentialResponse <> k.serverNonce <> k.serverPublicKeyshare <> k.serverMac
-  decode bs =
-    fields [elementBytes, nonceBytes, maskedBytes, nonceBytes, elementBytes, hashBytes] bs >>= \case
-      [e, mn, mr, n, ks, mac] -> do
-        e' <- element e
-        ks' <- element ks
-        pure
-          KE2
-            { credentialResponse = CredentialResponse e' mn mr
-            , serverNonce = n
-            , serverPublicKeyshare = ks'
-            , serverMac = mac
-            }
-      _ -> Left DeserializeError
+  encode (KE2 b) = b
+  decode bs = KE2 <$> checked ke2Bytes [0, credentialResponseBytes + nonceBytes] bs
 
 -- | 'KE3' is the client's last login message: a MAC that proves the client
 -- recovered its private key, and so knew the password.
@@ -325,7 +408,7 @@ newtype KE3 = KE3 {clientMac :: ByteString}
 
 instance Encoding KE3 where
   encode k = k.clientMac
-  decode bs = KE3 <$> (fields [hashBytes] bs >> pure bs)
+  decode bs = KE3 <$> checked hashBytes [] bs
 
 -- | 'ClientRegState' is what the client keeps between its registration
 -- request and the server's response: the OPRF's blind and the password, in
@@ -367,8 +450,6 @@ instance Encoding ClientLoginState where
             (k, p) = BS.splitAt ke1Bytes rest
         k' <- decode k
         pure (ClientLoginState (secretOf [keys, p]) k')
-    where
-      ke1Bytes = 2 * elementBytes + nonceBytes
 
 -- | 'ServerLoginState' is what the server keeps between KE2 and KE3: the
 -- client's MAC it expects, and the session key it will release when that
@@ -402,17 +483,17 @@ data ServerSetup = ServerSetup
 -- given, a zero private key among them.
 instance Encoding ServerSetup where
   encode s = secretEncoding s.secret [(0, hashBytes + scalarBytes)] (s.serverPublicKey <> encode s.fakeRecord) []
-  decode bs =
-    fields [hashBytes + scalarBytes, elementBytes, elementBytes + hashBytes + nonceBytes + hashBytes] bs >>= \case
-      [keys, pk, fake] -> do
-        pk' <- element pk
-        fake' <- decode fake
+  decode bs
+    | BS.length bs /= hashBytes + scalarBytes + elementBytes + recordBytes = Left DeserializeError
+    | otherwise = do
+        let keys = slice 0 (hashBytes + scalarBytes) bs
+        pk <- element (slice (hashBytes + scalarBytes) elementBytes bs)
+        fake <- decode (BS.drop (hashBytes + scalarBytes + elementBytes) bs)
         let sec = secretOf [keys]
             derived = unsafePerformIO (withSecret sec (\p -> publicBytesOr elementBytes (\o -> scalarMultBaseInto o (p `plusPtr` hashBytes))))
-        if derived == Just pk'
-          then pure ServerSetup {secret = sec, serverPublicKey = pk', fakeRecord = fake'}
+        if derived == Just pk
+          then pure ServerSetup {secret = sec, serverPublicKey = pk, fakeRecord = fake}
           else Left DeserializeError
-      _ -> Left DeserializeError
 
 -- | 'SessionKey' is the secret the two parties agree on at login, 64
 -- bytes. Each login has a different one.
@@ -421,7 +502,7 @@ newtype SessionKey = SessionKey Secret
 -- | The encoding is the key: a copy the caller must protect.
 instance Encoding SessionKey where
   encode (SessionKey k) = unsafePerformIO (copySecret k)
-  decode bs = SessionKey (secretOf [bs]) <$ fields [hashBytes] bs
+  decode bs = SessionKey (secretOf [bs]) <$ checked hashBytes [] bs
 
 -- | 'ExportKey' is a secret, 64 bytes, that only the client can compute,
 -- the same at registration and at every login with the same record. An
@@ -434,7 +515,7 @@ newtype ExportKey = ExportKey Secret
 -- | The encoding is the key: a copy the caller must protect.
 instance Encoding ExportKey where
   encode (ExportKey k) = unsafePerformIO (copySecret k)
-  decode bs = ExportKey (secretOf [bs]) <$ fields [hashBytes] bs
+  decode bs = ExportKey (secretOf [bs]) <$ checked hashBytes [] bs
 
 -- | 'Scrub' zeroes a value's secrets now, for a caller that knows the
 -- value's lifetime has ended: a login state once the login has finished, a
@@ -588,11 +669,7 @@ fakeRecordWith sk mask
 
 fakeRecordOf :: ByteString -> ByteString -> RegistrationRecord
 fakeRecordOf mask pk =
-  RegistrationRecord
-    { clientPublicKey = pk
-    , maskingKey = mask
-    , envelope = Envelope (BS.replicate nonceBytes 0) (BS.replicate hashBytes 0)
-    }
+  registrationRecordOf pk mask (Envelope (BS.replicate envelopeBytes 0))
 
 --------------------------------------------------------------------------------
 -- Steps
@@ -713,7 +790,7 @@ registrationResponse setup cid request = pureStep . withSecret setup.secret $ \s
     k <- alloc s scalarBytes
     oprfKeyInto s sp cid k
     evaluated <- needJust DeserializeError (OPRF.blindEvaluateWith k request.blindedMessage)
-    pure RegistrationResponse {evaluatedMessage = evaluated, serverPublicKey = setup.serverPublicKey}
+    pure (registrationResponseOf evaluated setup.serverPublicKey)
 
 -- | 'finalizeRegistration' is FinalizeRegistrationRequest: the client
 -- unblinds the OPRF's output, stretches it into the randomized password,
@@ -745,7 +822,7 @@ finalizeRegistrationIO config envelopeNonce st response ids = withSecret st.secr
     export <- alloc s hashBytes
     (env, clientPublicKey) <- store s rwd envelopeNonce response.serverPublicKey ids export
     exportKey <- lift (secretFromPtr export hashBytes)
-    pure (RegistrationRecord {clientPublicKey, maskingKey, envelope = env}, ExportKey exportKey)
+    pure (registrationRecordOf clientPublicKey maskingKey env, ExportKey exportKey)
 
 -- | The keys the envelope's nonce and the randomized password lead to,
 -- written into memory: the MAC key, the export key and the seed of the
@@ -764,7 +841,7 @@ cleartextCredentials serverPk clientPk ids =
   (serverPk, fromMaybe serverPk ids.server, fromMaybe clientPk ids.client)
 
 encodeCleartext :: (ByteString, ByteString, ByteString) -> ByteString
-encodeCleartext (spk, sid, cid) = spk <> i2osp 2 (BS.length sid) <> sid <> i2osp 2 (BS.length cid) <> cid
+encodeCleartext (spk, sid, cid) = BS.concat [spk, i2osp 2 (BS.length sid), sid, i2osp 2 (BS.length cid), cid]
 
 -- | Store: derive the client's key pair from the randomized password and
 -- the nonce, and MAC the nonce with the cleartext credentials. The export
@@ -778,7 +855,7 @@ store s rwd n serverPk ids export = do
   clientPk <- needJust DeriveKeyPairError (OPRF.deriveKeyPairInto clientSk [Mem seed seedBytes] dhInfo)
   tag <- lift . publicBytes hashBytes $ \o ->
     hmacSha512Into o (Mem authKey hashBytes) [Pub n, Pub (encodeCleartext (cleartextCredentials serverPk clientPk ids))]
-  pure (Envelope n tag, clientPk)
+  pure (envelopeOf n tag, clientPk)
 
 -- | Recover: derive the client's key pair again, writing the private key at
 -- @clientSk@ and the export key at @export@, and check the envelope's MAC.
@@ -828,7 +905,7 @@ clientStartFrom fillBlind n fillSeed password = case checkPassword password of
       pure (share, blinded)
     case made of
       (Just share, Just blinded) ->
-        let ke1 = KE1 {blindedMessage = blinded, clientNonce = n, clientPublicKeyshare = share}
+        let ke1 = ke1Of blinded n share
          in pure (Right (ClientLoginState {secret = sec, ke1}, ke1))
       (Nothing, _) -> Left DeriveKeyPairError <$ scrubSecret sec
       (_, Nothing) -> Left InvalidInputError <$ scrubSecret sec
@@ -872,17 +949,16 @@ serverRespondIO config setup record cid mn sn seed ke1 ids = withSecret setup.se
   withScratchOp 2048 $ \s -> do
     ExceptT (pure (checkLengths config ids))
     check InvalidInputError (BS.length mn == nonceBytes && BS.length sn == nonceBytes && partLength seed == seedBytes)
-    check DeserializeError (BS.length record.maskingKey == hashBytes)
     -- CreateCredentialResponse
     k <- alloc s scalarBytes
     oprfKeyInto s sp cid k
     evaluated <- needJust DeserializeError (OPRF.blindEvaluateWith k ke1.blindedMessage)
     pad <- alloc s maskedBytes
     lift (hkdfExpandInto pad maskedBytes (Pub record.maskingKey) (mn <> "CredentialResponsePad"))
-    let plain = setup.serverPublicKey <> record.envelope.nonce <> record.envelope.authTag
-    check DeserializeError (BS.length plain == maskedBytes)
+    let RegistrationRecord recorded = record
+        plain = setup.serverPublicKey <> BS.drop (elementBytes + hashBytes) recorded
     masked <- lift (xorWith pad plain)
-    let credentialResponse = CredentialResponse {evaluatedMessage = evaluated, maskingNonce = mn, maskedResponse = masked}
+    let credentialResponse = credentialResponseOf evaluated mn masked
         (_, sid, cidentity) = cleartextCredentials setup.serverPublicKey record.clientPublicKey ids
     -- AuthServerRespond
     eSk <- alloc s scalarBytes
@@ -899,7 +975,7 @@ serverRespondIO config setup record cid mn sn seed ke1 ids = withSecret setup.se
       copyBytes (p `plusPtr` hashBytes) sessionKey hashBytes
     pure
       ( ServerLoginState st
-      , KE2 {credentialResponse, serverNonce = sn, serverPublicKeyshare = ePk, serverMac = mac}
+      , ke2Of credentialResponse sn ePk mac
       )
 
 -- | 'clientFinish' is GenerateKE3. The client unblinds the OPRF's output,
@@ -917,7 +993,6 @@ clientFinish config st ke2 ids = pureStep . withSecret st.secret $ \sp ->
         clientSecret = sp `plusPtr` scalarBytes
         password = Mem (sp `plusPtr` (2 * scalarBytes)) (secretLength st.secret - 2 * scalarBytes)
     check ReflectedValueError (cr.evaluatedMessage /= st.ke1.blindedMessage)
-    check DeserializeError (BS.length cr.maskedResponse == maskedBytes)
     output <- alloc s hashBytes
     need DeserializeError (OPRF.finalizeInto output password blind cr.evaluatedMessage)
     rwd <- alloc s hashBytes
@@ -927,11 +1002,10 @@ clientFinish config st ke2 ids = pureStep . withSecret st.secret $ \sp ->
     pad <- alloc s maskedBytes
     lift (hkdfExpandInto pad maskedBytes (Mem maskingKey hashBytes) (cr.maskingNonce <> "CredentialResponsePad"))
     plain <- lift (xorWith pad cr.maskedResponse)
-    let (serverPk, rest) = BS.splitAt elementBytes plain
-        (n, tag) = BS.splitAt nonceBytes rest
+    let (serverPk, env) = BS.splitAt elementBytes plain
     clientSk <- alloc s scalarBytes
     export <- alloc s hashBytes
-    (_, sid, cidentity) <- recover s rwd serverPk (Envelope n tag) ids clientSk export
+    (_, sid, cidentity) <- recover s rwd serverPk (Envelope env) ids clientSk export
     -- The envelope's MAC covers the server's key, so a key that passes it was
     -- registered; it is checked all the same before it is used.
     _ <- ExceptT (pure (element serverPk))

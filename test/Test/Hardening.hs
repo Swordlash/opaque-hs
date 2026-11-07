@@ -114,8 +114,8 @@ spec = do
       let remasked pk =
             let cr = ke2.credentialResponse
                 pad = hkdfExpand record.maskingKey (cr.maskingNonce <> "CredentialResponsePad") (32 + 32 + 64)
-                plain = pk <> record.envelope.nonce <> record.envelope.authTag
-             in ke2 {credentialResponse = cr {maskedResponse = BS.pack (BS.zipWith xor pad plain)}}
+                plain = BS.concat [pk, record.envelope.nonce, record.envelope.authTag]
+             in ke2Of (credentialResponseOf cr.evaluatedMessage cr.maskingNonce (BS.pack (BS.zipWith xor pad plain))) ke2.serverNonce ke2.serverPublicKeyshare ke2.serverMac
       -- The re-masking itself is right: the real key still opens.
       fmap (const ()) (clientFinish quick cst (remasked setup.serverPublicKey) defaultIdentities) `shouldBe` Right ()
       fmap (const ()) (clientFinish quick cst (remasked other) defaultIdentities) `shouldBe` Left EnvelopeRecoveryError
@@ -125,14 +125,14 @@ spec = do
     let setup = setupOf 4
     it "is refused at registration" $ do
       (st, request) <- ok (registrationRequestWith (scalar 81) "pw")
-      let reflected = RegistrationResponse {evaluatedMessage = request.blindedMessage, serverPublicKey = setup.serverPublicKey}
+      let reflected = registrationResponseOf request.blindedMessage setup.serverPublicKey
       fmap (const ()) (finalizeRegistrationWith quick (BS.replicate 32 1) st reflected defaultIdentities) `shouldBe` Left ReflectedValueError
     it "is refused at login" $ do
       (record, _) <- ok (registered quick setup defaultIdentities "pw")
       (cst, ke1) <- ok (clientStartWith (scalar 82) (BS.replicate 32 83) (BS.replicate 32 84) "pw")
       (_, ke2) <- ok (serverRespondWith quick setup record cid random1 ke1 defaultIdentities)
       let cr = ke2.credentialResponse
-          reflected = ke2 {credentialResponse = CredentialResponse {evaluatedMessage = ke1.blindedMessage, maskingNonce = cr.maskingNonce, maskedResponse = cr.maskedResponse}}
+          reflected = ke2Of (credentialResponseOf ke1.blindedMessage cr.maskingNonce cr.maskedResponse) ke2.serverNonce ke2.serverPublicKeyshare ke2.serverMac
       fmap (const ()) (clientFinish quick cst reflected defaultIdentities) `shouldBe` Left ReflectedValueError
 
   describe "decoding" $ do

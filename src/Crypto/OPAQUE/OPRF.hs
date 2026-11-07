@@ -52,7 +52,7 @@ import System.IO.Unsafe (unsafePerformIO)
 -- 0) and the suite @ristretto255-SHA512@. It separates this suite's hashes
 -- from every other use of the same hash functions.
 contextString :: ByteString
-contextString = "OPRFV1-" <> BS.singleton 0 <> "-ristretto255-SHA512"
+contextString = BS.concat ["OPRFV1-", BS.singleton 0, "-ristretto255-SHA512"]
 
 -- | The longest input this package takes: 65534 bytes. RFC 9497, section
 -- 5.1, says an input "MUST be smaller than 2^16 - 1 bytes"; the two-byte
@@ -88,7 +88,7 @@ deriveKeyPairInto sk seed info = go 0
     go counter
       | counter > (255 :: Int) = pure Nothing
       | otherwise = do
-          hashToScalarInto sk ("DeriveKeyPair" <> contextString) (seed <> [Pub (i2osp 2 (BS.length info) <> info <> i2osp 1 counter)])
+          hashToScalarInto sk ("DeriveKeyPair" <> contextString) (seed <> [Pub (BS.concat [i2osp 2 (BS.length info), info, i2osp 1 counter])])
           zero <- isZero sk scalarBytes
           if zero
             then go (counter + 1)
