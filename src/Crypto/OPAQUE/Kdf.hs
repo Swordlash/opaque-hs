@@ -7,7 +7,8 @@
 -- HKDF is libsodium's @crypto_kdf_hkdf_sha512_*@, which came in 1.0.19.
 -- With the package's flag @older-libsodium@ it is the Haskell polyfill in
 -- "Crypto.OPAQUE.Kdf.Polyfill" instead, over libsodium's HMAC-SHA-512, so
--- that the package builds against 1.0.18 (Debian 12 and Ubuntu 24.04). This
+-- that the package builds against 1.0.18 (Debian 12 and Ubuntu 24.04) where
+-- a machine must use that system library. The flag is off by default. This
 -- module is the one place that chooses.
 --
 -- @expand_message_xmd@ is written here over libsodium's SHA-512 in every

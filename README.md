@@ -100,9 +100,12 @@ What it does not protect:
 ## Building
 
 It needs libsodium 1.0.19 or later, found through `pkg-config`, for its
-HKDF-SHA-512. With the cabal flag `older-libsodium` it builds against 1.0.18
-(Debian 12's and Ubuntu 24.04's `libsodium-dev`), with a Haskell HKDF in its
-place. It builds natively only. It is not buildable for wasm32-wasi: there
+HKDF-SHA-512. The cabal flag `older-libsodium` (off by default) is for a
+machine that must build against an older system library, 1.0.18 (Debian 12's
+and Ubuntu 24.04's `libsodium-dev`): HKDF is then a Haskell polyfill over
+libsodium's HMAC-SHA-512, which the test suite checks against libsodium's own
+HKDF in every build without the flag. The wiki builds without it, against a
+libsodium of its toolchain's, built from source. It builds natively only. It is not buildable for wasm32-wasi: there
 `sodium_malloc` would have no `mlock` and no guard pages, and cost about
 320 KiB per secret (WASI's 64 KiB pages), and any script on a page can read
 a wasm program's whole memory. A browser client is better served by an

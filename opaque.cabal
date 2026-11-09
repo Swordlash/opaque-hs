@@ -23,10 +23,13 @@ tested-with:        GHC == 9.10.3, GHC == 9.14.1
 
 flag older-libsodium
   description:
-    Build against libsodium 1.0.18, which has no HKDF of its own: HKDF-SHA-512
-    is then the Haskell polyfill in Crypto.OPAQUE.Kdf.Polyfill, over
-    libsodium's HMAC-SHA-512. Without the flag the package needs libsodium
-    1.0.19 or later and uses its crypto_kdf_hkdf_sha512.
+    Build against libsodium 1.0.18, which has no HKDF of its own, for a
+    machine that must use such a system library (Debian 12's and Ubuntu
+    24.04's): HKDF-SHA-512 is then the Haskell polyfill in
+    Crypto.OPAQUE.Kdf.Polyfill, over libsodium's HMAC-SHA-512. Without the
+    flag (the default) the package needs libsodium 1.0.19 or later and uses
+    its crypto_kdf_hkdf_sha512, and the test suite checks the polyfill
+    against it.
   default:     False
   manual:      True
 

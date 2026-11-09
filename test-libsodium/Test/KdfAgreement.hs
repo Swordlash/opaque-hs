@@ -2,9 +2,9 @@
 -- @older-libsodium@) gives what libsodium's own @crypto_kdf_hkdf_sha512@
 -- gives, on random inputs. This module is compiled only without the flag,
 -- where "Crypto.OPAQUE.Kdf" is libsodium's; so the code behind the flag is
--- tested on every run that has libsodium 1.0.19 or later. The native build
--- turns the flag on until the toolchain builds a newer libsodium (WP5.74a2),
--- so for now no run compiles it.
+-- tested on every run that has libsodium 1.0.19 or later, which the wiki's
+-- native build always has: its toolchain builds the pinned release from
+-- source (toolchain/libsodium.sh).
 module Test.KdfAgreement (spec) where
 
 import Crypto.OPAQUE.Kdf qualified as Kdf
