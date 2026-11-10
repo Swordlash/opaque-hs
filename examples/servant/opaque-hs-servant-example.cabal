@@ -1,0 +1,47 @@
+cabal-version:      3.0
+name:               opaque-hs-servant-example
+version:            0.1.0.0
+synopsis:           An example of opaque-hs: a servant server and its client
+description:
+  One program, the example of the repository's README. It starts a small
+  HTTP server, written with servant, that registers users and signs them in
+  through OPAQUE and keeps everything in memory, runs a client against it
+  (a registration, logins, and a request only a signed-in user may make),
+  and prints what happened. It is not on Hackage and not meant to be.
+license:            MIT
+author:             Mateusz Goślinowski
+maintainer:         mateusz.goslinowski@gmail.com
+category:           Cryptography
+build-type:         Simple
+
+executable opaque-hs-servant-example
+  default-language: GHC2021
+  main-is:          Main.hs
+  ghc-options:      -Wall -Wextra -Wcompat -Wredundant-constraints -Wunused-packages -threaded
+  default-extensions:
+      DataKinds
+      DeriveAnyClass
+      DerivingStrategies
+      DuplicateRecordFields
+      LambdaCase
+      NamedFieldPuns
+      NoFieldSelectors
+      OverloadedRecordDot
+      OverloadedStrings
+      StrictData
+  build-depends:
+      aeson >= 2.1 && < 2.4,
+      base >= 4.20 && < 5,
+      base64-bytestring >= 1.2 && < 1.3,
+      bytestring >= 0.11.5 && < 0.13,
+      containers >= 0.6 && < 0.9,
+      http-client >= 0.7 && < 0.8,
+      http-types >= 0.12 && < 0.13,
+      opaque-hs,
+      servant-client >= 0.20 && < 0.21,
+      servant-server >= 0.20 && < 0.21,
+      stm >= 2.5 && < 2.6,
+      text >= 2.0 && < 2.2,
+      time >= 1.12 && < 1.16,
+      transformers >= 0.6 && < 0.7,
+      warp >= 3.3 && < 3.5

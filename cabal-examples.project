@@ -1,0 +1,21 @@
+-- The project of the example, examples/servant: the package and the
+-- servant server and client written with it.
+--
+--   cabal --project-file=cabal-examples.project run opaque-hs-servant-example
+--
+-- The example is kept out of cabal.project so that building and testing
+-- the package does not build servant and warp.
+import: cabal.project
+
+packages: examples/servant
+
+package opaque-hs-servant-example
+  ghc-options: -Werror
+
+-- servant's, http-api-data's and monad-control's upper bounds lag behind
+-- the QuickCheck, text-iso8601 and transformers-compat that the newest GHC
+-- here is served with.
+allow-newer:
+  servant:QuickCheck,
+  http-api-data:text-iso8601,
+  monad-control:transformers-compat

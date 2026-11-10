@@ -29,6 +29,7 @@ extra-doc-files:    CHANGELOG.md
 extra-source-files: cabal-js-client.project
                     cabal-wasm-client.project
                     cabal-wasm.project
+                    cabal.project
                     interop/client-wasm.mjs
                     interop/serenity.mjs
                     jsbits/opaque.js
