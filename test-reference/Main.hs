@@ -103,8 +103,16 @@ oprfSpec = do
   it "expands a message to the same bytes (expand_message_xmd with SHA-512)" $
     forM_ [1, 2, 31, 32, 63, 64, 65, 127, 128, 200, 255] $ \n -> do
       message <- generate (someBytes 0 300)
-      dst <- generate (someBytes 1 255)
+      dst <- generate (someBytes 1 254)
       Ref.expandMessageXmd message dst n `shouldReturn` Just (Kdf.expandMessageXmd message dst n)
+  -- RFC 9380 allows a tag of up to 255 bytes. liboprf refuses one of
+  -- exactly 255, so there is nothing to compare with there; the tags the
+  -- OPRF itself uses are far shorter.
+  it "expands with a tag of 255 bytes, which liboprf refuses" $ do
+    message <- generate (someBytes 0 300)
+    dst <- generate (someBytes 255 255)
+    Ref.expandMessageXmd message dst 64 `shouldReturn` Nothing
+    BS.length (Kdf.expandMessageXmd message dst 64) `shouldBe` 64
 
 replicateM_' :: Int -> IO () -> IO ()
 replicateM_' n act = forM_ [1 .. n] (const act)
