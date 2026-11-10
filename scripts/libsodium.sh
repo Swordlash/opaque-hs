@@ -7,6 +7,8 @@
 #   sh scripts/libsodium.sh env [PREFIX]       # KEY=VALUE lines of the variables a build needs
 #
 # PREFIX is .libsodium in the repository by default.
+# A PREFIX given must be a new or empty directory, or one this script
+# filled before: it deletes what is in it.
 #
 # The package needs libsodium 1.0.19 or later for its HKDF-SHA-512, found
 # through pkg-config. Debian 12 and Ubuntu 24.04 ship 1.0.18. A machine
@@ -38,11 +40,27 @@ mode=${1:-install}
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 prefix=${2:-$root/.libsodium}
 mark="$LIBSODIUM_VERSION $LIBSODIUM_SHA256"
+owner=.opaque-hs-libsodium
 
 say() { printf 'libsodium: %s\n' "$*"; }
 die() {
   printf 'libsodium: %s\n' "$*" >&2
   exit 1
+}
+
+# The prefix is this script's own to delete and fill: a directory that does
+# not exist yet, an empty one, or one this script made before (it leaves
+# the file $owner in it). Anything else is refused untouched, so that a
+# prefix such as ~/.local is never emptied.
+claim() {
+  if [ -e "$prefix" ] && [ ! -d "$prefix" ]; then
+    die "$prefix is not a directory"
+  fi
+  if [ -d "$prefix" ] && [ ! -f "$prefix/$owner" ] && [ -n "$(ls -A "$prefix")" ]; then
+    die "$prefix has files this script did not put there; give it a new or empty directory"
+  fi
+  mkdir -p "$prefix"
+  : >"$prefix/$owner"
 }
 
 installed() {
@@ -73,7 +91,10 @@ case $mode in
     done
     say "building libsodium $LIBSODIUM_VERSION from source into $prefix"
     name=libsodium-$LIBSODIUM_VERSION.tar.gz
-    rm -rf "$prefix"
+    claim
+    # What an earlier, unfinished run left; nothing else is in a prefix
+    # this script owns.
+    rm -rf "$prefix/src" "$prefix/include" "$prefix/lib" "$prefix/.built" "$prefix/$name"
     mkdir -p "$prefix/src"
     archive=$prefix/$name
     if ! fetch "https://download.libsodium.org/libsodium/releases/$name" "$archive"; then

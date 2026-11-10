@@ -8,6 +8,8 @@
 #   sh scripts/reference.sh env [PREFIX]       # the PKG_CONFIG_PATH line a build needs
 #
 # PREFIX is .reference in the repository by default.
+# A PREFIX given must be a new or empty directory, or one this script
+# filled before: it deletes what is in it.
 #
 # libopaque (https://github.com/stef/libopaque) is an independent
 # implementation of OPAQUE in C, over libsodium. The test suite
@@ -54,11 +56,27 @@ mode=${1:-install}
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 prefix=${2:-$root/.reference}
 stamp="liboprf $LIBOPRF_COMMIT libopaque $LIBOPAQUE_COMMIT build 2"
+owner=.opaque-hs-reference
 
 say() { printf 'reference: %s\n' "$*"; }
 die() {
   printf 'reference: %s\n' "$*" >&2
   exit 1
+}
+
+# The prefix is this script's own to delete and fill: a directory that does
+# not exist yet, an empty one, or one this script made before (it leaves
+# the file $owner in it). Anything else is refused untouched, so that a
+# prefix such as ~/.local is never emptied.
+claim() {
+  if [ -e "$prefix" ] && [ ! -d "$prefix" ]; then
+    die "$prefix is not a directory"
+  fi
+  if [ -d "$prefix" ] && [ ! -f "$prefix/$owner" ] && [ -n "$(ls -A "$prefix")" ]; then
+    die "$prefix has files this script did not put there; give it a new or empty directory"
+  fi
+  mkdir -p "$prefix"
+  : >"$prefix/$owner"
 }
 
 installed() { [ -f "$prefix/.built" ] && [ "$(cat "$prefix/.built")" = "$stamp" ]; }
@@ -94,6 +112,7 @@ case $mode in
       die "libsodium 1.0.19 or later is needed, found through pkg-config (see the README)"
     sodium_cflags=$(pkg-config --cflags libsodium)
 
+    claim
     rm -f "$prefix/.built"
     say "fetching liboprf $LIBOPRF_COMMIT"
     fetch "$LIBOPRF_URL" "$LIBOPRF_COMMIT" "$prefix/src/liboprf"
