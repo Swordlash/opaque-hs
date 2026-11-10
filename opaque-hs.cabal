@@ -24,6 +24,7 @@ build-type:         Simple
 extra-doc-files:    CHANGELOG.md
                     README.md
 extra-source-files: interop/serenity.mjs
+                    scripts/reference.sh
 tested-with:        GHC == 9.10.3, GHC == 9.14.1
 
 source-repository head
@@ -39,6 +40,14 @@ flag older-libsodium
     flag (the default) the package needs libsodium 1.0.19 or later and uses
     its crypto_kdf_hkdf_sha512, and the test suite checks the polyfill
     against it.
+  default:     False
+  manual:      True
+
+flag reference
+  description:
+    Build the test suite opaque-reference, which compares this package
+    with libopaque, a second implementation of OPAQUE, step by step.
+    scripts/reference.sh builds libopaque for it; the README says how.
   default:     False
   manual:      True
 
@@ -113,4 +122,28 @@ test-suite opaque-test
       directory,
       process,
       text,
+      opaque-hs
+
+-- This package against libopaque (scripts/reference.sh), with the same
+-- random values on both sides and with each side's client against the
+-- other's server. Only with the flag reference, since it needs libopaque
+-- built; not with older-libsodium, since libopaque is built against
+-- libsodium's own HKDF.
+test-suite opaque-reference
+  import:           shared
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test-reference
+  main-is:          Main.hs
+  other-modules:    Reference
+  c-sources:        test-reference/cbits/shim.c
+  cc-options:       -Wall -Wextra
+  if !flag(reference) || flag(older-libsodium) || arch(wasm32)
+    buildable: False
+  else
+    pkgconfig-depends: opaque-reference, libsodium >= 1.0.19
+  build-depends:
+      base,
+      bytestring,
+      hspec >= 2.10 && < 2.12,
+      QuickCheck >= 2.14 && < 2.20,
       opaque-hs
