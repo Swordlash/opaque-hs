@@ -39,6 +39,13 @@ LIBSODIUM_SHA256=adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be334
 mode=${1:-install}
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 prefix=${2:-$root/.libsodium}
+# A relative PREFIX is taken from the directory the script is run in. It
+# is made absolute here: the build changes directory, and the pkg-config
+# file and `env` must name a place that holds from anywhere.
+case $prefix in
+  /*) ;;
+  *) prefix=$PWD/$prefix ;;
+esac
 mark="$LIBSODIUM_VERSION $LIBSODIUM_SHA256"
 owner=.opaque-hs-libsodium
 

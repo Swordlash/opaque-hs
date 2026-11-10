@@ -55,6 +55,13 @@ LIBOPAQUE_COMMIT=6e9ac92f9a2289679e04b0b0c5fdc307bb3de54e
 mode=${1:-install}
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 prefix=${2:-$root/.reference}
+# A relative PREFIX is taken from the directory the script is run in. It
+# is made absolute here: the build changes directory, and the pkg-config
+# file and `env` must name a place that holds from anywhere.
+case $prefix in
+  /*) ;;
+  *) prefix=$PWD/$prefix ;;
+esac
 stamp="liboprf $LIBOPRF_COMMIT libopaque $LIBOPAQUE_COMMIT build 2"
 owner=.opaque-hs-reference
 
