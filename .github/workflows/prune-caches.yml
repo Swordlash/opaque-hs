@@ -1,0 +1,74 @@
+name: Prune caches
+
+# Deletes the Actions caches of pull requests that are closed.
+#
+# A cache saved by a pull request's run belongs to that pull request's ref
+# (refs/pull/<number>/merge): no other run can read it, and once the pull
+# request is merged or closed nothing ever will. GitHub keeps it for seven
+# more days, and counts it towards the repository's 10 GB, past which it
+# deletes the caches used least recently, main's among them, which every
+# pull request falls back on. The toolchains make the copies large: emsdk,
+# the three cross compilers and the two GHCs the runner's image lacks come
+# to about 2 GB for each pull request.
+#
+# It runs when a pull request closes, and looks at every pull request's
+# caches, not only that one's: a run that was still saving when its pull
+# request closed leaves caches behind, and the next close takes them. It
+# can also be run by hand. main's caches are never touched.
+#
+# A pull request from a fork gets a read-only token, so its close deletes
+# nothing and says so; the next close of a pull request of this repository
+# does it.
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prune:
+    name: prune the caches of closed pull requests
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete the caches of closed pull requests
+        run: |
+          deleted=0
+          kept=0
+          failed=0
+          # One line per cache of a pull request: its id, the pull request's
+          # number and its key. Keys have no spaces.
+          caches=$(gh cache list --repo "$GITHUB_REPOSITORY" --limit 1000 --json id,key,ref \
+            --jq '.[] | select(.ref | test("^refs/pull/[0-9]+/merge$")) | "\(.id) \(.ref | split("/")[2]) \(.key)"')
+          while read -r id number key; do
+            [ -n "$id" ] || continue
+            # Asked once for each pull request.
+            var="state_$number"
+            if [ -z "${!var:-}" ]; then
+              printf -v "$var" '%s' "$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json state --jq .state || echo UNKNOWN)"
+            fi
+            if [ "${!var}" = MERGED ] || [ "${!var}" = CLOSED ]; then
+              if gh cache delete "$id" --repo "$GITHUB_REPOSITORY"; then
+                echo "Deleted $key of #$number (${!var})."
+                deleted=$((deleted + 1))
+              else
+                failed=$((failed + 1))
+              fi
+            else
+              kept=$((kept + 1))
+            fi
+          done <<< "$caches"
+          echo "Deleted $deleted caches of closed pull requests; kept $kept of open ones."
+          if [ "$failed" -gt 0 ]; then
+            echo "::notice title=Cache pruning::$failed caches could not be deleted (a fork's pull request has a read-only token); the next close prunes them."
+          fi
