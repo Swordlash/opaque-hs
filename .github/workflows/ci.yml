@@ -47,6 +47,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: haskell-actions/setup@v2
+        id: setup
         with:
           ghc-version: ${{ matrix.ghc }}
           cabal-version: ${{ env.CABAL_VERSION }}
@@ -67,10 +68,11 @@ jobs:
           sh scripts/libsodium.sh install
           sh scripts/libsodium.sh env >> "$GITHUB_ENV"
 
+      # The setup action says where it put cabal's store.
       - name: Cache the cabal store
         uses: actions/cache@v5
         with:
-          path: ~/.local/state/cabal/store
+          path: ${{ steps.setup.outputs.cabal-store }}
           key: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ matrix.ghc }}-${{ hashFiles('cabal.project', 'opaque-hs.cabal') }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ matrix.ghc }}-
 
@@ -140,6 +142,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: haskell-actions/setup@v2
+        id: setup
         with:
           ghc-version: ${{ env.NEWEST_GHC }}
           cabal-version: ${{ env.CABAL_VERSION }}
@@ -154,10 +157,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends libsodium-dev pkg-config
           pkg-config --modversion libsodium
 
+      # The setup action says where it put cabal's store.
       - name: Cache the cabal store
         uses: actions/cache@v5
         with:
-          path: ~/.local/state/cabal/store
+          path: ${{ steps.setup.outputs.cabal-store }}
           key: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ env.NEWEST_GHC }}-${{ hashFiles('cabal.project', 'opaque-hs.cabal') }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ env.NEWEST_GHC }}-
 
