@@ -153,10 +153,11 @@ jobs:
           mkdir "$RUNNER_TEMP/from-sdist"
           tar xzf "$RUNNER_TEMP"/sdist/opaque-hs-*.tar.gz --strip-components=1 --directory "$RUNNER_TEMP/from-sdist"
           # What only the browser backends compile, which the build below
-          # would not miss.
+          # would not miss, and the project files of the other backends
+          # with the one they import.
           for file in jsbits/opaque.js src-serenity/Crypto/OPAQUE/Client.hs test-client/Main.hs \
             test-client/driver.js interop/client-wasm.mjs scripts/client.sh \
-            cabal-wasm-client.project cabal-js-client.project; do
+            cabal.project cabal-wasm.project cabal-wasm-client.project cabal-js-client.project; do
             test -f "$RUNNER_TEMP/from-sdist/$file" || { echo "The source distribution lacks $file." >&2; exit 1; }
           done
           cd "$RUNNER_TEMP/from-sdist"
