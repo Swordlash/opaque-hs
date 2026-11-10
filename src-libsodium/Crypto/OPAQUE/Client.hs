@@ -38,7 +38,9 @@
 --   all three.
 --
 -- This client keeps its secrets in memory libsodium zeroes
--- ("Crypto.OPAQUE.Secret"); the other cannot.
+-- ("Crypto.OPAQUE.Secret"); the other cannot. The other has a module more,
+-- @Crypto.OPAQUE.Client.WebCrypto@, not built here, whose finishing steps
+-- keep the export key in the browser's WebCrypto.
 module Crypto.OPAQUE.Client
   ( -- * Configuration
     Config (..)

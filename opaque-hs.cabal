@@ -15,7 +15,9 @@ description:
   natively, and for GHC's WebAssembly backend with the flag
   wasm-libsodium. Without that flag there, and on GHC's JavaScript backend,
   the package is the client alone, Crypto.OPAQUE.Client, with the same
-  names and types, calling @serenity-kit/opaque. The README says how.
+  names and types, calling @serenity-kit/opaque, and there
+  Crypto.OPAQUE.Client.WebCrypto keeps the export key in the browser's
+  WebCrypto. The README says how.
 license:            MIT
 license-file:       LICENSE
 author:             Mateusz Goślinowski
@@ -111,6 +113,10 @@ library
   -- program, and linked by the JavaScript backend.
   if arch(javascript) || (arch(wasm32) && !flag(wasm-libsodium))
     hs-source-dirs: src-serenity
+    exposed-modules:
+        Crypto.OPAQUE.Client.WebCrypto
+    other-modules:
+        Crypto.OPAQUE.Client.Serenity
     build-depends:
         base64-bytestring >= 1.2 && < 1.3,
         haskell-halogen-jsbits >= 0.1 && < 0.2,

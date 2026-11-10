@@ -114,34 +114,110 @@ function opaque_hs_arguments(state, iterations, kib, hasClient, client, hasServe
   };
 }
 
-// Finish a login with KE2: KE3, the session key and the export key.
-function opaque_hs_finish_login(state, ke2, iterations, kib, hasClient, client, hasServer, server) {
+// Finish a login with KE2: serenity's result, or a status.
+function opaque_hs_login(state, ke2, iterations, kib, hasClient, client, hasServer, server) {
   try {
     var given = opaque_hs_arguments(state, iterations, kib, hasClient, client, hasServer, server);
-    if (typeof given === "number") return "fail " + given;
+    if (typeof given === "number") return given;
     given.clientLoginState = state.state;
     given.loginResponse = ke2;
     var r = opaque_hs_module.client.finishLogin(given);
     // serenity does not say which: a wrong password, a wrong MAC of the
     // server's, or the OPRF's value reflected.
-    if (r === undefined) return "fail 5";
-    return "ok " + r.finishLoginRequest + " " + r.sessionKey + " " + r.exportKey;
+    return r === undefined ? 5 : r;
   } catch (error) {
-    return "fail " + opaque_hs_status_of(error);
+    return opaque_hs_status_of(error);
   }
 }
 
-// Finish a registration with the server's response: the record and the
-// export key.
-function opaque_hs_finish_registration(state, response, iterations, kib, hasClient, client, hasServer, server) {
+// Finish a registration with the server's response: serenity's result, or
+// a status.
+function opaque_hs_registration(state, response, iterations, kib, hasClient, client, hasServer, server) {
   try {
     var given = opaque_hs_arguments(state, iterations, kib, hasClient, client, hasServer, server);
-    if (typeof given === "number") return "fail " + given;
+    if (typeof given === "number") return given;
     given.clientRegistrationState = state.state;
     given.registrationResponse = response;
-    var r = opaque_hs_module.client.finishRegistration(given);
-    return "ok " + r.registrationRecord + " " + r.exportKey;
+    return opaque_hs_module.client.finishRegistration(given);
   } catch (error) {
-    return "fail " + opaque_hs_status_of(error);
+    return opaque_hs_status_of(error);
   }
+}
+
+// A login's answer: KE3, the session key and the export key.
+function opaque_hs_finish_login(state, ke2, iterations, kib, hasClient, client, hasServer, server) {
+  var r = opaque_hs_login(state, ke2, iterations, kib, hasClient, client, hasServer, server);
+  if (typeof r === "number") return "fail " + r;
+  return "ok " + r.finishLoginRequest + " " + r.sessionKey + " " + r.exportKey;
+}
+
+// A registration's answer: the record and the export key.
+function opaque_hs_finish_registration(state, response, iterations, kib, hasClient, client, hasServer, server) {
+  var r = opaque_hs_registration(state, response, iterations, kib, hasClient, client, hasServer, server);
+  if (typeof r === "number") return "fail " + r;
+  return "ok " + r.registrationRecord + " " + r.exportKey;
+}
+
+// The export key as a WebCrypto key, for Crypto.OPAQUE.Client.WebCrypto:
+// the key material of HKDF, not extractable, with the usages named
+// ("deriveKey", "deriveBits", or both with a space between). A promise of
+// the CryptoKey, or of null where there is no WebCrypto (a page not served
+// over HTTPS) or it refuses the key.
+//
+// This is the one place where the JavaScript decodes base64url itself: the
+// point of the variant is that this key's bytes never reach the Haskell
+// program. They are in one Uint8Array, zeroed once the key is imported.
+// The string serenity returned the key in cannot be zeroed.
+function opaque_hs_hold(exportKey, usages) {
+  var subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if (!subtle || typeof subtle.importKey !== "function") return Promise.resolve(null);
+  var bytes = null;
+  try {
+    var binary = atob(exportKey.replace(/-/g, "+").replace(/_/g, "/"));
+    bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return subtle.importKey("raw", bytes, "HKDF", false, usages.split(" ")).then(
+      function (key) {
+        bytes.fill(0);
+        return key;
+      },
+      function () {
+        bytes.fill(0);
+        return null;
+      },
+    );
+  } catch (error) {
+    if (bytes !== null) bytes.fill(0);
+    return Promise.resolve(null);
+  }
+}
+
+// A login's answer without its export key, which is held in WebCrypto: a
+// promise of { answer, key }, the answer "ok" with KE3 and the session
+// key, or "fail" and a status.
+function opaque_hs_finish_login_held(state, ke2, iterations, kib, hasClient, client, hasServer, server, usages) {
+  var r = opaque_hs_login(state, ke2, iterations, kib, hasClient, client, hasServer, server);
+  if (typeof r === "number") return Promise.resolve({ answer: "fail " + r, key: null });
+  return opaque_hs_hold(r.exportKey, usages).then(function (key) {
+    return { answer: "ok " + r.finishLoginRequest + " " + r.sessionKey, key: key };
+  });
+}
+
+// A registration's answer without its export key, which is held in
+// WebCrypto: a promise of { answer, key }, the answer "ok" with the record,
+// or "fail" and a status.
+function opaque_hs_finish_registration_held(state, response, iterations, kib, hasClient, client, hasServer, server, usages) {
+  var r = opaque_hs_registration(state, response, iterations, kib, hasClient, client, hasServer, server);
+  if (typeof r === "number") return Promise.resolve({ answer: "fail " + r, key: null });
+  return opaque_hs_hold(r.exportKey, usages).then(function (key) {
+    return { answer: "ok " + r.registrationRecord, key: key };
+  });
+}
+
+function opaque_hs_held_answer(held) {
+  return held.answer;
+}
+
+function opaque_hs_held_key(held) {
+  return held.key;
 }

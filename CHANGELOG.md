@@ -53,3 +53,9 @@ libsodium (`OPAQUE_HS_CLIENT`, `scripts/client.sh`).
 server that keeps its users in memory, and a client that registers, logs
 in, and asks for what only a signed-in user gets
 (`cabal --project-file=cabal-examples.project run opaque-hs-servant-example`).
+
+`Crypto.OPAQUE.Client.WebCrypto`, on the WebAssembly and JavaScript
+backends only, has the client's two finishing steps with the export key
+kept in the browser's WebCrypto (`finalizeRegistrationWebCrypto`,
+`clientFinishWebCrypto`): they give a `CryptoKey` of HKDF that cannot be
+exported, and the key's bytes never reach the Haskell program.
