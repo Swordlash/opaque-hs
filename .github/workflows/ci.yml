@@ -19,6 +19,13 @@ concurrency:
 permissions:
   contents: read
 
+# `shell: bash` names bash with -o pipefail, which the default shell of a
+# step lacks: a command that fails before a pipe (`cabal haddock | tee`)
+# then fails its step.
+defaults:
+  run:
+    shell: bash
+
 env:
   CABAL_VERSION: '3.16.1.0'
   NODE_VERSION: '24'
