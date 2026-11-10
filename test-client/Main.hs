@@ -73,6 +73,7 @@ $( browserJS
      , ("js_derive", "opaque_hs_test_derive", Safe, [t|JSVal -> JSText -> IO (Promise Text)|])
      , ("js_export_refused", "opaque_hs_test_export_refused", Safe, [t|JSVal -> IO (Promise Bool)|])
      , ("js_import", "opaque_hs_test_import", Safe, [t|JSText -> IO (Promise JSVal)|])
+     , ("js_without_webcrypto", "opaque_hs_test_without_webcrypto", Safe, [t|Bool -> IO ()|])
      ]
  )
 
@@ -299,6 +300,26 @@ selfTest = do
   (_, wrongKe2') <- serverStarts (encode record') wrongKe1'
   refused <- clientFinishWebCrypto (DeriveBits :| []) config wrong' wrongKe2' defaultIdentities
   check "a wrong password fails with the key held too, and holds none" (either (== EnvelopeRecoveryError) (const False) refused)
+
+  -- A page served over plain HTTP: no crypto.subtle. Everything works but
+  -- the holding of the key.
+  js_without_webcrypto True
+  (plainHttp, plainHttpRequest) <- expectRight "without WebCrypto a registration starts" =<< registrationRequest password
+  plainHttpResponse <-
+    expectRight "its response decodes" . decode =<< unbase64 . fromJSText =<< js_registration_response setup user (text64 (encode plainHttpRequest))
+  (plainHttpRecord, noKeyAtRegistration) <-
+    expectRight "without WebCrypto a registration finishes" =<< finalizeRegistrationWebCrypto (DeriveKey :| []) config plainHttp plainHttpResponse defaultIdentities
+  check "without WebCrypto a registration holds no key" (null noKeyAtRegistration)
+  (plainHttpLogin, plainHttpKe1) <- expectRight "without WebCrypto a login starts" =<< clientStart password
+  (plainHttpServer, plainHttpKe2) <- serverStarts (encode plainHttpRecord) plainHttpKe1
+  (plainHttpKe3, plainHttpSessionKey, noKeyAtLogin) <-
+    expectRight "without WebCrypto a login finishes" =<< clientFinishWebCrypto (DeriveKey :| []) config plainHttpLogin plainHttpKe2 defaultIdentities
+  check "without WebCrypto a login holds no key" (null noKeyAtLogin)
+  plainHttpTheirs <- unbase64 . fromJSText =<< js_finish_login plainHttpServer (text64 (encode plainHttpKe3))
+  check "without WebCrypto the server still agrees on the session key" (encode plainHttpSessionKey == plainHttpTheirs && BS.length plainHttpTheirs == 64)
+  check "without WebCrypto the step that gives the export key as bytes still gives it" . either (const False) (\(_, _, k) -> BS.length (encode k) == 64) $
+    clientFinish config plainHttpLogin plainHttpKe2 defaultIdentities
+  js_without_webcrypto False
 
   scrub loggingIn
   check "a scrubbed state is refused" . (== Left InvalidInputError) $

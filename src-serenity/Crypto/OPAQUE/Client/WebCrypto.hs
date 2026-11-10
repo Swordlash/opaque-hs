@@ -26,6 +26,11 @@
 -- @crypto.subtle.deriveKey@ or @deriveBits@, HKDF with the hash, salt and
 -- info it chooses.
 --
+-- A page served over plain HTTP has no WebCrypto: a browser gives
+-- @crypto.subtle@ only to pages served over HTTPS and to localhost. The
+-- client does not need it, and a registration or a login works there as
+-- anywhere. These two steps then succeed and give 'Nothing' for the key.
+--
 -- Importing a key is asynchronous in WebCrypto, so both steps wait for a
 -- JavaScript promise, and 'clientFinishWebCrypto' is in 'IO', unlike
 -- 'Crypto.OPAQUE.Client.clientFinish'. On WebAssembly they must run where a

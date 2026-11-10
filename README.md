@@ -290,9 +290,15 @@ Right (ke3, sessionKey, held) <- clientFinishWebCrypto (DeriveKey :| []) config 
 ```
 
 Importing a key is asynchronous in WebCrypto, so both steps are in `IO`.
-The key is `Nothing` where the page has no WebCrypto, which a browser
-gives only to pages served over HTTPS and to localhost; the step has
-still succeeded.
+
+**A page served over plain HTTP** has no WebCrypto: a browser gives
+`crypto.subtle` only to pages served over HTTPS and to localhost. The
+client itself does not need it. Registrations and logins work there as
+anywhere, with all four steps of `Crypto.OPAQUE.Client`, and these two
+steps succeed as well and give `Nothing` for the key: the application
+signs the user in and goes without what it would have derived from the
+export key. The tests run a registration and a login with `crypto.subtle`
+taken away.
 
 **What differs from the client over libsodium.** The module's haddock has
 the list; in short:

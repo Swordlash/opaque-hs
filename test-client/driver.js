@@ -103,3 +103,22 @@ function opaque_hs_test_export_refused(key) {
 function opaque_hs_test_import(text) {
   return crypto.subtle.importKey("raw", Buffer.from(text, "base64url"), "HKDF", false, ["deriveBits"]);
 }
+
+// Take WebCrypto away, or give it back, as a page that is not served over
+// HTTPS has it: crypto is there with its random numbers, which serenity
+// needs, and crypto.subtle is not.
+var opaque_hs_test_crypto = null;
+
+function opaque_hs_test_without_webcrypto(without) {
+  if (without && opaque_hs_test_crypto === null) {
+    var real = globalThis.crypto;
+    opaque_hs_test_crypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: { getRandomValues: real.getRandomValues.bind(real) },
+    });
+  } else if (!without && opaque_hs_test_crypto !== null) {
+    Object.defineProperty(globalThis, "crypto", opaque_hs_test_crypto);
+    opaque_hs_test_crypto = null;
+  }
+}
