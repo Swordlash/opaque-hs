@@ -25,7 +25,7 @@ extra-doc-files:    CHANGELOG.md
                     README.md
 extra-source-files: interop/serenity.mjs
                     scripts/reference.sh
-tested-with:        GHC == 9.10.3, GHC == 9.14.1
+tested-with:        GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
   type:     git
@@ -79,9 +79,10 @@ library
       base >= 4.20 && < 5,
       bytestring >= 0.11.5 && < 0.13,
       transformers >= 0.6 && < 0.7
-  -- Natively only: the wiki's browser client is @serenity-kit/opaque, from
-  -- npm, and no libsodium is built for wasm32-wasi. Not buildable there, so
-  -- that nothing built for the browser can come to depend on this package.
+  -- Natively only: no libsodium is built for wasm32-wasi here, and a
+  -- browser is better served by @serenity-kit/opaque, from npm (the
+  -- README says why). Not buildable there, so that nothing built for the
+  -- browser can come to depend on this package.
   if arch(wasm32)
     buildable: False
   if flag(older-libsodium)

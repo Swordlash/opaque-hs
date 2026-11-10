@@ -1,0 +1,191 @@
+name: CI
+
+# Builds and tests the package natively on every GHC the cabal file names
+# (tested-with), against a libsodium built from source, since the runners'
+# own is 1.0.18 and the package needs 1.0.19. One job also builds against
+# that system library with the flag older-libsodium. The newest GHC's job
+# does the checks that need doing once: the comparison with libopaque, the
+# haddocks, and the package as Hackage would take it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CABAL_VERSION: '3.16.1.0'
+  NODE_VERSION: '24'
+  # The newest GHC of the matrix: its job runs the checks done once.
+  NEWEST_GHC: '9.14.1'
+  FOURMOLU_VERSION: '0.21.0.0'
+  # Of the release's fourmolu-<version>-linux-x86_64.zip.
+  FOURMOLU_SHA256: 'aadf6931653df7b96f52014cf8eb4285a3e8778cd0b531499fc3ee013e1e00c7'
+
+jobs:
+  native:
+    name: native (GHC ${{ matrix.ghc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc: ['9.10.3', '9.12.4', '9.14.1']
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: ${{ env.CABAL_VERSION }}
+
+      # For the tests against @serenity-kit/opaque, which runs under Node.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache libsodium
+        uses: actions/cache@v5
+        with:
+          path: .libsodium
+          key: ${{ runner.os }}-${{ runner.arch }}-libsodium-${{ hashFiles('scripts/libsodium.sh') }}
+
+      - name: Build libsodium
+        run: |
+          sh scripts/libsodium.sh install
+          sh scripts/libsodium.sh env >> "$GITHUB_ENV"
+
+      - name: Cache the cabal store
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/state/cabal/store
+          key: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ matrix.ghc }}-${{ hashFiles('cabal.project', 'opaque-hs.cabal') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ matrix.ghc }}-
+
+      - name: Install @serenity-kit/opaque
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: cabal build all
+
+      - name: Test
+        run: cabal test opaque-test --test-show-details=direct
+
+      # The interoperability tests skip, as pending, where Node or the
+      # package is missing. Here they must run.
+      - name: Check that the tests against serenity-kit ran
+        run: |
+          log=$(find dist-newstyle -name 'opaque-hs-*-opaque-test.log' | head -n 1)
+          if grep -q 'skipped:' "$log"; then
+            echo "The tests against @serenity-kit/opaque were skipped:" >&2
+            grep 'skipped:' "$log" >&2
+            exit 1
+          fi
+
+      - name: Cache the reference implementation
+        if: matrix.ghc == env.NEWEST_GHC
+        uses: actions/cache@v5
+        with:
+          path: .reference
+          key: ${{ runner.os }}-${{ runner.arch }}-reference-${{ hashFiles('scripts/reference.sh', 'scripts/libsodium.sh') }}
+
+      - name: Test against libopaque
+        if: matrix.ghc == env.NEWEST_GHC
+        run: |
+          sh scripts/reference.sh install
+          export PKG_CONFIG_PATH="$PWD/.reference/lib/pkgconfig:$PKG_CONFIG_PATH"
+          cabal test opaque-reference -freference --test-show-details=direct
+
+      # Hackage builds the haddocks; a warning there is a broken link in
+      # the documentation.
+      - name: Haddocks, without warnings
+        if: matrix.ghc == env.NEWEST_GHC
+        run: |
+          cabal haddock opaque-hs 2>&1 | tee haddock.log
+          if grep -E 'Warning|could not find link destinations|Missing documentation' haddock.log; then
+            echo "The haddocks have warnings." >&2
+            exit 1
+          fi
+
+      # The package as Hackage takes it: its description checked, and the
+      # source distribution built on its own, outside the repository.
+      - name: Check the package, and build its source distribution
+        if: matrix.ghc == env.NEWEST_GHC
+        run: |
+          cabal check
+          cabal sdist --output-directory "$RUNNER_TEMP/sdist"
+          mkdir "$RUNNER_TEMP/from-sdist"
+          tar xzf "$RUNNER_TEMP"/sdist/opaque-hs-*.tar.gz --strip-components=1 --directory "$RUNNER_TEMP/from-sdist"
+          cd "$RUNNER_TEMP/from-sdist"
+          cabal build --enable-tests
+
+  # The flag older-libsodium: the system's libsodium 1.0.18, with the
+  # package's own HKDF over libsodium's HMAC.
+  older-libsodium:
+    name: native (libsodium 1.0.18)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: ${{ env.NEWEST_GHC }}
+          cabal-version: ${{ env.CABAL_VERSION }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the system's libsodium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsodium-dev pkg-config
+          pkg-config --modversion libsodium
+
+      - name: Cache the cabal store
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/state/cabal/store
+          key: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ env.NEWEST_GHC }}-${{ hashFiles('cabal.project', 'opaque-hs.cabal') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ env.NEWEST_GHC }}-
+
+      - name: Install @serenity-kit/opaque
+        run: npm ci --ignore-scripts
+
+      - name: Build and test
+        run: cabal test opaque-test -folder-libsodium --test-show-details=direct
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache fourmolu
+        uses: actions/cache@v5
+        with:
+          path: ~/fourmolu
+          key: ${{ runner.os }}-fourmolu-${{ env.FOURMOLU_VERSION }}-${{ env.FOURMOLU_SHA256 }}
+
+      # The release's zip, checked against the pinned checksum, with the
+      # one binary inside it.
+      - name: Install fourmolu
+        run: |
+          mkdir -p ~/fourmolu
+          if [ ! -x ~/fourmolu/fourmolu ]; then
+            zip="$HOME/fourmolu/fourmolu.zip"
+            curl --fail --location --retry 5 --silent --show-error --output "$zip" \
+              "https://github.com/fourmolu/fourmolu/releases/download/v$FOURMOLU_VERSION/fourmolu-$FOURMOLU_VERSION-linux-x86_64.zip"
+            printf '%s  %s\n' "$FOURMOLU_SHA256" "$zip" | sha256sum --check --status
+            unzip -o -q "$zip" -d ~/fourmolu
+            chmod +x ~/fourmolu/fourmolu
+            rm "$zip"
+          fi
+          echo "$HOME/fourmolu" >> "$GITHUB_PATH"
+
+      - name: Check the formatting
+        run: fourmolu --mode check src test test-libsodium test-older test-reference

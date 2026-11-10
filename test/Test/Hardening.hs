@@ -1,6 +1,7 @@
 -- | The cases other implementations of OPAQUE test beyond the RFC's
 -- vectors (opaque-ke, bytemare/opaque, circl, opaque-ts, libopaque,
--- serenity-kit), for this package: Argon2id with the wiki's parameters,
+-- serenity-kit), for this package: Argon2id with the parameters of the wiki
+-- this package was written for (Swordlash\/wiki: 128 MiB, four passes),
 -- messages from another session, a server key that is not the one the
 -- envelope was made with, a reflected OPRF element, validation on decoding,
 -- the bounds of the two-byte lengths, zero scalars, identities, the server's
@@ -19,7 +20,8 @@ import Data.Char (digitToInt)
 import Data.Either (isLeft)
 import Test.Hspec
 
--- | The wiki's Argon2id: 128 MiB, four passes.
+-- | The Argon2id of the wiki this package was written for: 128 MiB, four
+-- passes.
 wikiKsf :: Ksf
 wikiKsf = Argon2id {opsLimit = 4, memLimit = 128 * 1024 * 1024}
 
