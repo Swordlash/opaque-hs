@@ -18,3 +18,11 @@ a scratch buffer zeroed after each step for intermediate values, and
 flag `older-libsodium`, off by default, builds against 1.0.18 with a Haskell
 HKDF, which the test suite compares with libsodium's own wherever the flag
 is off. Native only: not buildable for wasm32-wasi.
+
+The package is named `opaque-hs` and has a repository of its own; it was
+the package `opaque` of the wiki at Swordlash/wiki. Its tests compare it
+with two other implementations: `@serenity-kit/opaque` under Node, and
+libopaque with liboprf, built from source by `scripts/reference.sh`, in the
+test suite `opaque-reference` (flag `reference`), step by step and with the
+same random values. `scripts/libsodium.sh` builds a libsodium new enough on
+a machine whose own is 1.0.18.

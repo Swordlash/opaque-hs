@@ -1,6 +1,6 @@
-// The other side of opaque's interoperability tests (opaque/test/Test/Interop.hs):
-// @serenity-kit/opaque, opaque-ke compiled to wasm, which the wiki's
-// browser client uses. It reads one command per line on standard input and
+// The other side of opaque's interoperability tests (test/Test/Interop.hs):
+// @serenity-kit/opaque, opaque-ke compiled to wasm, the client a browser
+// would use. It reads one command per line on standard input and
 // answers one line on standard output, words separated by spaces:
 //
 //   client-start-registration PASSWORD          -> STATE REQUEST

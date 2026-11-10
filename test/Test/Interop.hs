@@ -1,5 +1,5 @@
 -- | Interoperability with @serenity-kit/opaque@ (opaque-ke compiled to
--- wasm), the OPAQUE implementation the wiki's browser client uses: its
+-- wasm), the OPAQUE implementation a browser client would use: its
 -- client against this package's server, this package's client against its
 -- server, and a registration made by one client with a login by the other.
 -- Random passwords and identities, the empty context (serenity-kit passes

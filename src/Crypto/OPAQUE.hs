@@ -3,10 +3,10 @@
 --
 -- OPAQUE lets a client prove that it knows a password to a server that
 -- never sees the password, not even at registration. The server keeps a
--- 'RegistrationRecord' per client; a thief of the records cannot test a
--- password guess against them without the server's 'ServerSetup', and even
+-- t'RegistrationRecord' per client; a thief of the records cannot test a
+-- password guess against them without the server's t'ServerSetup', and even
 -- with it must pay for every guess with the key stretching function. A
--- login also agrees on a 'SessionKey', and gives the client an 'ExportKey'
+-- login also agrees on a t'SessionKey', and gives the client an t'ExportKey'
 -- that only the client can compute.
 --
 -- Registration takes one round trip and an upload:

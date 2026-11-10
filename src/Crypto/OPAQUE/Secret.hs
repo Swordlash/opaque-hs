@@ -1,5 +1,5 @@
--- | Memory for secrets, which this package scrubs: long-lived 'Secret's,
--- and 'Scratch' buffers for the intermediate values of one operation.
+-- | Memory for secrets, which this package scrubs: long-lived t'Secret's,
+-- and t'Scratch' buffers for the intermediate values of one operation.
 --
 -- A 'ByteString' is pinned, so the garbage collector never copies one, but
 -- every concatenation, XOR or derivation over 'ByteString's makes a new
@@ -7,17 +7,17 @@
 -- package, a value derived from the password or from a private key never
 -- becomes an ordinary 'ByteString'. It lives in one of two kinds of memory:
 --
--- * A 'Secret' holds a value that outlives the operation that made it: the
+-- * A t'Secret' holds a value that outlives the operation that made it: the
 --   server's setup, the client's and the server's login states (with the
 --   password copied into them), and the session and export keys handed to
 --   the caller. It is libsodium's @sodium_malloc@: memory outside GHC's
 --   heap, between guard pages, locked with @mlock@ where the system allows
---   it, and zeroed by @sodium_free@, which the 'ForeignPtr''s finalizer
---   calls. A failure to lock (the limit on locked memory, 8 MiB under
+--   it, and zeroed by @sodium_free@, which the finalizer of its
+--   'ForeignPtr' calls. A failure to lock (the limit on locked memory, 8 MiB under
 --   systemd by default, reached with many login states held) is not an
 --   error: the memory is then not locked.
 --
--- * A 'Scratch' is one buffer for the intermediate values of one operation
+-- * A t'Scratch' is one buffer for the intermediate values of one operation
 --   (the OPRF's output, the randomized password, the envelope's keys, the
 --   Diffie-Hellman products, the derived keys). @sodium_malloc@ would cost a
 --   system call or three per value, and count against the limit on locked
@@ -101,7 +101,7 @@ sodiumReady = unsafePerformIO $ do
 memzero :: Ptr Word8 -> Int -> IO ()
 memzero p n = c_memzero (castPtr p) (fromIntegral n)
 
--- | 'Secret' is a secret value in memory this package zeroes when it is
+-- | t'Secret' is a secret value in memory this package zeroes when it is
 -- freed (see the module's description). It has no 'Show' that prints the
 -- bytes, and 'Eq' compares in constant time with @sodium_memcmp@.
 data Secret = Secret Int (ForeignPtr Word8)
@@ -171,7 +171,7 @@ copySecret s@(Secret n _) =
 scrubSecret :: Secret -> IO ()
 scrubSecret s@(Secret n _) = withSecret s (`memzero` n)
 
--- | 'Scratch' is one operation's buffer for its intermediate secrets,
+-- | t'Scratch' is one operation's buffer for its intermediate secrets,
 -- handed out in pieces by 'scratch' and zeroed as a whole when the
 -- operation ends.
 data Scratch = Scratch (Ptr Word8) Int (IORef Int)

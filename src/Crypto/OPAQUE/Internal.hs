@@ -16,8 +16,8 @@
 --
 -- Every value derived from the password or from a private key lives in
 -- memory this package zeroes ("Crypto.OPAQUE.Secret"): the states and keys
--- a step returns are 'Secret's, and the intermediate values of one step
--- live in that step's 'Scratch' buffer, zeroed when the step ends, on its
+-- a step returns are t'Secret's, and the intermediate values of one step
+-- live in that step's t'Scratch' buffer, zeroed when the step ends, on its
 -- error paths too. Messages, public keys, nonces and MACs that are sent are
 -- ordinary 'ByteString's. The steps are pure functions; inside, each runs
 -- its allocations and writes in 'IO' with 'unsafePerformIO', and copies a
@@ -104,7 +104,7 @@ import Foreign.Storable (peekByteOff, pokeByteOff)
 import GHC.Records (HasField (..))
 import System.IO.Unsafe (unsafePerformIO)
 
--- | 'Config' is what both parties must agree on beyond the suite.
+-- | t'Config' is what both parties must agree on beyond the suite.
 --
 -- @context@ is the RFC's shared context string, mixed into every key the
 -- exchange derives, so that a transcript of one application is useless in
@@ -134,7 +134,7 @@ data Ksf
       }
   deriving stock (Eq, Show)
 
--- | 'Identities' are the optional identities of the client and the server.
+-- | t'Identities' are the optional identities of the client and the server.
 -- An identity left out stands for the party's public key, which is the
 -- RFC's default and what 'defaultIdentities' gives. Both parties must use
 -- the same identities at registration and at every login.
@@ -148,7 +148,7 @@ data Identities = Identities
 defaultIdentities :: Identities
 defaultIdentities = Identities {client = Nothing, server = Nothing}
 
--- | 'CredentialId' is the server's name for one client's record: the RFC's
+-- | t'CredentialId' is the server's name for one client's record: the RFC's
 -- @credential_identifier@. The server derives the client's OPRF key from it,
 -- so it must never change for a record, and two records must never share
 -- one.
@@ -228,7 +228,7 @@ checked size elementsAt bs
 element :: ByteString -> Either Error ByteString
 element e = if isValidElement e then Right e else Left DeserializeError
 
--- | 'RegistrationRequest' is the client's first registration message: the
+-- | t'RegistrationRequest' is the client's first registration message: the
 -- password, blinded by the OPRF.
 newtype RegistrationRequest = RegistrationRequest {blindedMessage :: ByteString}
   deriving stock (Eq, Show)
@@ -237,7 +237,7 @@ instance Encoding RegistrationRequest where
   encode r = r.blindedMessage
   decode bs = RegistrationRequest <$> element bs
 
--- | 'RegistrationResponse' is the server's answer to a registration request:
+-- | t'RegistrationResponse' is the server's answer to a registration request:
 -- the OPRF evaluated under the client's key (@evaluatedMessage@), and the
 -- server's public key (@serverPublicKey@).
 newtype RegistrationResponse = RegistrationResponse ByteString
@@ -258,7 +258,7 @@ instance Encoding RegistrationResponse where
   encode (RegistrationResponse b) = b
   decode bs = RegistrationResponse <$> checked (2 * elementBytes) [0, elementBytes] bs
 
--- | 'Envelope' is what lets the client recover its private key at login: a
+-- | t'Envelope' is what lets the client recover its private key at login: a
 -- random nonce (@nonce@), and a MAC (@authTag@) over the nonce and the
 -- parties' public keys and identities, keyed by a key only the right
 -- password leads to.
@@ -279,7 +279,7 @@ instance HasField "nonce" Envelope ByteString where
 instance HasField "authTag" Envelope ByteString where
   getField (Envelope b) = slice nonceBytes hashBytes b
 
--- | 'RegistrationRecord' is what the server keeps for a client: the
+-- | t'RegistrationRecord' is what the server keeps for a client: the
 -- client's public key (@clientPublicKey@), the key that masks the login's
 -- answer (@maskingKey@), and the envelope (@envelope@). Nothing in it lets
 -- the server, or a thief of the server's data, test a guess of the
@@ -308,7 +308,7 @@ instance Encoding RegistrationRecord where
   encode (RegistrationRecord b) = b
   decode bs = RegistrationRecord <$> checked recordBytes [0] bs
 
--- | 'CredentialResponse' is the OPRF half of KE2: the evaluated element
+-- | t'CredentialResponse' is the OPRF half of KE2: the evaluated element
 -- (@evaluatedMessage@), and the server's public key and the client's
 -- envelope, encrypted (@maskedResponse@) under a pad derived from the
 -- record's masking key and a nonce (@maskingNonce@).
@@ -342,7 +342,7 @@ instance HasField "maskingNonce" CredentialResponse ByteString where
 instance HasField "maskedResponse" CredentialResponse ByteString where
   getField (CredentialResponse b) = slice (elementBytes + nonceBytes) maskedBytes b
 
--- | 'KE1' is the client's first login message: the blinded password (the
+-- | t'KE1' is the client's first login message: the blinded password (the
 -- credential request, @blindedMessage@), a nonce (@clientNonce@), and the
 -- client's ephemeral public key (@clientPublicKeyshare@).
 newtype KE1 = KE1 ByteString
@@ -369,7 +369,7 @@ instance Encoding KE1 where
   encode (KE1 b) = b
   decode bs = KE1 <$> checked ke1Bytes [0, elementBytes + nonceBytes] bs
 
--- | 'KE2' is the server's login message: the credential response
+-- | t'KE2' is the server's login message: the credential response
 -- (@credentialResponse@), a nonce (@serverNonce@), the server's ephemeral
 -- public key (@serverPublicKeyshare@), and a MAC (@serverMac@) that proves
 -- the server knows its private key and the client's record.
@@ -401,7 +401,7 @@ instance Encoding KE2 where
   encode (KE2 b) = b
   decode bs = KE2 <$> checked ke2Bytes [0, credentialResponseBytes + nonceBytes] bs
 
--- | 'KE3' is the client's last login message: a MAC that proves the client
+-- | t'KE3' is the client's last login message: a MAC that proves the client
 -- recovered its private key, and so knew the password.
 newtype KE3 = KE3 {clientMac :: ByteString}
   deriving stock (Eq, Show)
@@ -410,9 +410,9 @@ instance Encoding KE3 where
   encode k = k.clientMac
   decode bs = KE3 <$> checked hashBytes [] bs
 
--- | 'ClientRegState' is what the client keeps between its registration
+-- | t'ClientRegState' is what the client keeps between its registration
 -- request and the server's response: the OPRF's blind and the password, in
--- one 'Secret' (the blind's 32 bytes, then the password), and the blinded
+-- one t'Secret' (the blind's 32 bytes, then the password), and the blinded
 -- element it sent, to refuse it back as the evaluated one.
 data ClientRegState = ClientRegState
   { secret :: Secret
@@ -431,9 +431,9 @@ instance Encoding ClientRegState where
         e' <- element e
         pure (ClientRegState (secretOf [b, p]) e')
 
--- | 'ClientLoginState' is what the client keeps between KE1 and KE2: the
+-- | t'ClientLoginState' is what the client keeps between KE1 and KE2: the
 -- OPRF's blind, the ephemeral private key and the password, in one
--- 'Secret' (32 bytes, 32 bytes, then the password), and KE1 itself.
+-- t'Secret' (32 bytes, 32 bytes, then the password), and KE1 itself.
 data ClientLoginState = ClientLoginState
   { secret :: Secret
   , ke1 :: KE1
@@ -451,9 +451,9 @@ instance Encoding ClientLoginState where
         k' <- decode k
         pure (ClientLoginState (secretOf [keys, p]) k')
 
--- | 'ServerLoginState' is what the server keeps between KE2 and KE3: the
+-- | t'ServerLoginState' is what the server keeps between KE2 and KE3: the
 -- client's MAC it expects, and the session key it will release when that
--- MAC arrives, in one 'Secret' of 128 bytes.
+-- MAC arrives, in one t'Secret' of 128 bytes.
 newtype ServerLoginState = ServerLoginState {secret :: Secret}
 
 -- | The encoding is the expected MAC and the session key. It is secret: a
@@ -464,9 +464,9 @@ instance Encoding ServerLoginState where
     | BS.length bs /= 2 * hashBytes = Left DeserializeError
     | otherwise = Right (ServerLoginState (secretOf [bs]))
 
--- | 'ServerSetup' is the server's long-term secret, generated once: the
+-- | t'ServerSetup' is the server's long-term secret, generated once: the
 -- seed every client's OPRF key is derived from and the server's private
--- key for the key exchange, in one 'Secret' (64 bytes, then 32), the
+-- key for the key exchange, in one t'Secret' (64 bytes, then 32), the
 -- matching public key, and a fake record that answers for clients with no
 -- record (RFC 9807, section 6.3.2.2), so that an answer does not tell
 -- whether a client exists. Losing it makes every record useless; leaking it
@@ -495,7 +495,7 @@ instance Encoding ServerSetup where
           then pure ServerSetup {secret = sec, serverPublicKey = pk, fakeRecord = fake}
           else Left DeserializeError
 
--- | 'SessionKey' is the secret the two parties agree on at login, 64
+-- | t'SessionKey' is the secret the two parties agree on at login, 64
 -- bytes. Each login has a different one.
 newtype SessionKey = SessionKey Secret
 
@@ -504,7 +504,7 @@ instance Encoding SessionKey where
   encode (SessionKey k) = unsafePerformIO (copySecret k)
   decode bs = SessionKey (secretOf [bs]) <$ checked hashBytes [] bs
 
--- | 'ExportKey' is a secret, 64 bytes, that only the client can compute,
+-- | t'ExportKey' is a secret, 64 bytes, that only the client can compute,
 -- the same at registration and at every login with the same record. An
 -- application can derive keys from it to encrypt the client's data; the
 -- server never learns it. The RFC requires that it is used only after the
@@ -626,7 +626,7 @@ xorWith pad bs =
 dhInfo :: ByteString
 dhInfo = "OPAQUE-DeriveDiffieHellmanKeyPair"
 
--- | 'generateServerSetup' makes a new 'ServerSetup' from libsodium's
+-- | 'generateServerSetup' makes a new t'ServerSetup' from libsodium's
 -- random numbers. A server runs it once and keeps the result secret.
 generateServerSetup :: IO (Either Error ServerSetup)
 generateServerSetup = do
@@ -652,7 +652,7 @@ setupFrom fillSeed keySeed fake = case fake of
       Nothing -> Left DeriveKeyPairError <$ scrubSecret sec
       Just pk' -> pure (Right ServerSetup {secret = sec, serverPublicKey = pk', fakeRecord = fake'})
 
--- | 'serverSetupWith' builds a 'ServerSetup' from an OPRF seed (64 bytes), a
+-- | 'serverSetupWith' builds a t'ServerSetup' from an OPRF seed (64 bytes), a
 -- seed for the server's key pair (32 bytes) and a fake record.
 serverSetupWith :: ByteString -> ByteString -> RegistrationRecord -> Either Error ServerSetup
 serverSetupWith seed keySeed fake
@@ -699,7 +699,8 @@ stretchInto :: Ksf -> Ptr Word8 -> Ptr Word8 -> Op ()
 stretchInto Identity out input = lift (copyBytes out input hashBytes)
 stretchInto (Argon2id ops mem) out input = need KsfError (argon2idInto out (BS.replicate 16 0) (Mem input hashBytes) ops mem)
 
--- | 'stretch' is 'stretchInto' over bytes, for the tests.
+-- | 'stretch' is the key stretching function's Stretch over bytes, for the
+-- tests: 64 bytes in, 64 bytes out.
 stretch :: Ksf -> ByteString -> Either Error ByteString
 stretch k msg
   | BS.length msg /= hashBytes = Left InvalidInputError
@@ -720,8 +721,9 @@ randomizedPasswordInto s k rwd output = do
   stretchInto k (both `plusPtr` hashBytes) output
   lift (hkdfExtractInto rwd "" both (2 * hashBytes))
 
--- | 'randomizedPassword' is 'randomizedPasswordInto' over bytes, for the
--- test vectors.
+-- | 'randomizedPassword' turns the OPRF's output, 64 bytes, into the key
+-- the envelope is derived from: Extract over the output and its stretched
+-- form. For the test vectors.
 randomizedPassword :: Ksf -> ByteString -> Either Error ByteString
 randomizedPassword k output
   | BS.length output /= hashBytes = Left InvalidInputError
@@ -910,7 +912,7 @@ clientStartFrom fillBlind n fillSeed password = case checkPassword password of
       (Nothing, _) -> Left DeriveKeyPairError <$ scrubSecret sec
       (_, Nothing) -> Left InvalidInputError <$ scrubSecret sec
 
--- | 'ServerRandom' is the random values of one KE2: the masking nonce, the
+-- | t'ServerRandom' is the random values of one KE2: the masking nonce, the
 -- server's nonce and the seed of its ephemeral key pair.
 data ServerRandom = ServerRandom
   { maskingNonce :: ByteString

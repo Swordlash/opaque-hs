@@ -2,7 +2,7 @@
 -- of the key derivations, round trips with real random values, the cases
 -- other implementations test beyond the vectors, QuickCheck properties, and
 -- the memory secrets are kept in, and interoperability with
--- @serenity-kit/opaque@, the wiki's browser client.
+-- @serenity-kit/opaque@, the client a browser would use.
 module Main (main) where
 
 import Test.Hardening qualified

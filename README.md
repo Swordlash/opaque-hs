@@ -42,11 +42,7 @@ key that only the client can compute and that is the same at every login.
 - **Constant-time** comparison of every MAC (`sodium_memcmp`).
 - **Secrets in memory it zeroes**: see [Memory](#memory).
 
-The tests run the RFCs' test vectors for this suite (RFC 9807 appendix C.1.1,
-C.1.2 and C.2.1; RFC 9497 appendix A.1.1), RFC 9380's `expand_message_xmd`
-vectors, HKDF-SHA-512 and Argon2id against OpenSSL, the cases other OPAQUE
-implementations test beyond the vectors, QuickCheck properties, and round
-trips with real random values.
+What it is tested against is under [Testing](#testing).
 
 ## What it does not implement
 
@@ -99,18 +95,93 @@ What it does not protect:
 
 ## Building
 
+It builds natively, with GHC 9.10 to 9.14; CI builds and tests it on
+9.10.3, 9.12.4 and 9.14.1. It is not buildable for WebAssembly or for the
+JavaScript backend.
+
 It needs libsodium 1.0.19 or later, found through `pkg-config`, for its
-HKDF-SHA-512. The cabal flag `older-libsodium` (off by default) is for a
-machine that must build against an older system library, 1.0.18 (Debian 12's
-and Ubuntu 24.04's `libsodium-dev`): HKDF is then a Haskell polyfill over
-libsodium's HMAC-SHA-512, which the test suite checks against libsodium's own
-HKDF in every build without the flag. The wiki builds without it, against a
-libsodium of its toolchain's, built from source. It builds natively only. It is not buildable for wasm32-wasi: there
-`sodium_malloc` would have no `mlock` and no guard pages, and cost about
-320 KiB per secret (WASI's 64 KiB pages), and any script on a page can read
-a wasm program's whole memory. A browser client is better served by an
-OPAQUE implementation built for it (the wiki uses `@serenity-kit/opaque`,
-which interoperates with this one).
+HKDF-SHA-512:
+
+```sh
+pkg-config --modversion libsodium   # 1.0.19 or later
+cabal build
+```
+
+Debian 12 and Ubuntu 24.04 ship libsodium 1.0.18. On such a machine there
+are two ways:
+
+- Build a newer libsodium from source with the script here, and point
+  `pkg-config` at it. It builds one pinned release, checked against its
+  checksum, as a static library under `.libsodium`, in under a minute:
+
+  ```sh
+  sh scripts/libsodium.sh install
+  export PKG_CONFIG_PATH="$PWD/.libsodium/lib/pkgconfig:$PKG_CONFIG_PATH"
+  cabal build
+  ```
+
+- Or build against the system's library with the cabal flag
+  `older-libsodium` (off by default): HKDF is then a Haskell polyfill over
+  libsodium's HMAC-SHA-512, which the test suite checks against libsodium's
+  own HKDF in every build without the flag.
+
+  ```sh
+  cabal build -folder-libsodium
+  ```
+
+Why not WebAssembly: there `sodium_malloc` would have no `mlock` and no
+guard pages, and cost about 320 KiB per secret (WASI's 64 KiB pages), and
+any script on a page can read a wasm program's whole memory. A browser
+client is better served by an OPAQUE implementation built for it, such as
+[`@serenity-kit/opaque`](https://github.com/serenity-kit/opaque), which
+this package is tested against.
+
+## Testing
+
+```sh
+npm ci            # once: @serenity-kit/opaque, for the tests against it
+cabal test opaque-test
+```
+
+`opaque-test` runs:
+
+- the RFCs' test vectors for this suite (RFC 9807 appendix C.1.1, C.1.2 and
+  C.2.1; RFC 9497 appendix A.1.1) and RFC 9380's `expand_message_xmd`
+  vectors;
+- HKDF-SHA-512 and Argon2id against OpenSSL's answers;
+- the cases other OPAQUE implementations test beyond the vectors, QuickCheck
+  properties of the encodings, and round trips with real random values;
+- **this package against `@serenity-kit/opaque`** (opaque-ke compiled to
+  WebAssembly, the client a browser would use), under Node: its client with
+  this package's server, this package's client with its server, and a
+  registration by one client with a login by the other. Without Node or
+  without `npm ci` these tests are skipped, and say so.
+
+A second test suite compares the package with a reference implementation,
+[libopaque](https://github.com/stef/libopaque) (in C, over
+[liboprf](https://github.com/stef/liboprf) and libsodium):
+
+```sh
+sh scripts/reference.sh install
+export PKG_CONFIG_PATH="$PWD/.reference/lib/pkgconfig:$PKG_CONFIG_PATH"
+cabal test opaque-reference -freference
+```
+
+`opaque-reference` runs, on random passwords, identities and contexts:
+
+- the OPRF's functions one by one, against liboprf;
+- a whole registration and a whole login with the same random values on
+  both sides: every message, the record, the session key and the export key
+  must be the same bytes, with Argon2id as libopaque stretches (2 passes,
+  64 MiB);
+- each side's client against the other's server, with real random values.
+
+`scripts/reference.sh` fetches libopaque and liboprf at two pinned commits
+and builds them under `.reference`. At those commits their own programs
+reproduce the test vectors of RFC 9807 and RFC 9497. Both libraries are
+under the LGPL, version 3 or later: nothing of them is in this repository
+or in the package, and they are linked only into that test program, which
+is not distributed.
 
 ## Using it
 
