@@ -1,0 +1,9 @@
+{
+  "name": "opaque-hs-interop",
+  "private": true,
+  "description": "The JavaScript the tests of opaque-hs run against: @serenity-kit/opaque under Node.",
+  "license": "MIT",
+  "dependencies": {
+    "@serenity-kit/opaque": "1.1.0"
+  }
+}

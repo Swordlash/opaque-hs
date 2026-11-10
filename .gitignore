@@ -1,0 +1,5 @@
+dist-newstyle/
+node_modules/
+.reference/
+cabal.project.local
+*.swp

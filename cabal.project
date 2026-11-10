@@ -1,0 +1,12 @@
+-- The project a developer and CI build with: the package and its tests.
+packages: .
+tests: True
+
+-- Hackage's index as it was at this time, so that `cabal update` changes
+-- no dependency. Bump it deliberately, in its own commit.
+index-state: 2026-11-09T00:00:00Z
+
+-- Warnings are errors here and not in opaque-hs.cabal, so that a newer
+-- compiler's new warning does not break a build from Hackage.
+package opaque-hs
+  ghc-options: -Werror
