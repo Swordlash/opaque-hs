@@ -24,6 +24,9 @@ build-type:         Simple
 extra-doc-files:    CHANGELOG.md
                     README.md
 extra-source-files: interop/serenity.mjs
+                    package-lock.json
+                    package.json
+                    scripts/libsodium.sh
                     scripts/reference.sh
 tested-with:        GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
