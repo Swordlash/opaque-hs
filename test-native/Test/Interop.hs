@@ -9,9 +9,19 @@
 -- command per line. Where Node or the package (the repository's
 -- node_modules, after @npm ci@) is missing, the tests say so and are
 -- skipped.
+--
+-- The same server and client are also run against "Crypto.OPAQUE.Client"
+-- as GHC's WebAssembly and JavaScript backends build it: the client that
+-- calls serenity-kit, compiled (test-client\/Main.hs), under Node. It says
+-- more than the tests above only where that client reads this package's
+-- types: a t'Config' (Argon2id's memory in bytes against serenity-kit's in
+-- KiB), the identities, the bytes of a password. The variable
+-- @OPAQUE_HS_CLIENT@ is the command that starts it
+-- (@sh scripts\/client.sh wasm serve@, or @js@); without it those tests are
+-- skipped, and with it a client that does not start is a failure.
 module Test.Interop (spec) where
 
-import Control.Exception (bracket)
+import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM_, replicateM)
 import Crypto.OPAQUE.Internal
 import Data.ByteString (ByteString)
@@ -22,10 +32,106 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import System.Directory (doesFileExist, findExecutable)
+import System.Environment (lookupEnv)
 import System.IO (BufferMode (..), Handle, hClose, hGetLine, hPutStrLn, hSetBuffering)
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, terminateProcess, waitForProcess)
 import Test.Hspec
 import Test.QuickCheck (Gen, choose, elements, generate, listOf, oneof)
+
+-- | The compiled client under Node, as two handles.
+data Compiled = Compiled Handle Handle
+
+-- | Run the compiled client for the test, where @OPAQUE_HS_CLIENT@ says
+-- how. A client that was asked for and does not start fails the test.
+withCompiled :: (Compiled -> IO ()) -> IO ()
+withCompiled act =
+  lookupEnv "OPAQUE_HS_CLIENT" >>= \case
+    Nothing -> skipped
+    Just command -> case words command of
+      [] -> skipped
+      program : arguments ->
+        bracket
+          (createProcess (proc program arguments) {std_in = CreatePipe, std_out = CreatePipe})
+          (\(i, o, _, p) -> mapM_ hClose i >> mapM_ hClose o >> terminateProcess p >> waitForProcess p)
+          $ \case
+            (Just i, Just o, _, _) -> do
+              hSetBuffering i LineBuffering
+              try (hGetLine o) >>= \case
+                Right "ready" -> act (Compiled i o)
+                Right other -> expectationFailure ("the compiled client said " <> show other <> " where it should say ready")
+                Left (e :: IOException) -> expectationFailure ("the compiled client did not start: " <> show e)
+            _ -> expectationFailure "the compiled client did not start"
+  where
+    skipped = pendingWith "not run: OPAQUE_HS_CLIENT is not set (sh scripts/client.sh wasm serve, or js)"
+
+-- | One command to the compiled client: the words of its answer, or the
+-- name of the 'Error' its step failed with.
+ask :: Compiled -> [String] -> IO (Either String [String])
+ask (Compiled i o) command = do
+  hPutStrLn i (unwords command)
+  answer <- words <$> hGetLine o
+  case answer of
+    "ok" : results -> pure (Right results)
+    ["fail", e] -> pure (Left e)
+    _ -> expectationFailure ("the compiled client: " <> unwords answer) >> pure (Left "")
+
+-- | Bytes as the compiled client takes and gives them: unpadded base64url
+-- after a @b@, so that no bytes are still a word.
+bytesArg :: ByteString -> String
+bytesArg = ('b' :) . b64
+
+-- | The bytes of a word the compiled client gave.
+fromArg :: String -> IO ByteString
+fromArg = \case
+  'b' : encoded -> bytes encoded
+  other -> expectationFailure ("not bytes: " <> other) >> pure BS.empty
+
+-- | A configuration and identities as the compiled client takes them.
+configArgs :: Config -> Identities -> [String]
+configArgs c ids =
+  [ bytesArg c.context
+  , case c.ksf of
+      Identity -> "identity"
+      Argon2id {opsLimit, memLimit} -> "argon2id:" <> show opsLimit <> ":" <> show memLimit
+  , maybe "-" bytesArg ids.client
+  , maybe "-" bytesArg ids.server
+  ]
+
+-- | Argon2id with one pass and memory in bytes that is, or is not, a whole
+-- number of KiB: libsodium takes bytes and serenity-kit KiB, and both
+-- clients must round the same way.
+someConfig :: Gen Config
+someConfig = do
+  memLimit <- elements [8192, 8192 + 512, 16384, 16384 + 1023]
+  pure Config {context = "", ksf = Argon2id {opsLimit = 1, memLimit}}
+
+-- | The compiled client registers with this package's server: the record
+-- and the export key.
+compiledRegisters :: Compiled -> Config -> ServerSetup -> Case -> IO (RegistrationRecord, ByteString)
+compiledRegisters c cfg setup x = do
+  [state, request] <- ok =<< ask c ["client-start-registration", bytesArg (encodeUtf8 x.password)]
+  request' <- ok . decode =<< fromArg request
+  response <- ok (registrationResponse setup (CredentialId (encodeUtf8 x.user)) request')
+  [record, exportKey] <- ok =<< ask c (["client-finish-registration", state, bytesArg (encode response)] <> configArgs cfg (idsOf x))
+  (,) <$> (ok . decode =<< fromArg record) <*> fromArg exportKey
+
+-- | The compiled client logs in to this package's server with a password:
+-- the export key, when both sides agree on a session key, or the name of
+-- the error its last step failed with.
+compiledLogsIn :: Compiled -> Config -> ServerSetup -> Maybe RegistrationRecord -> Case -> Text -> IO (Either String ByteString)
+compiledLogsIn c cfg setup record x password = do
+  [state, ke1] <- ok =<< ask c ["client-start-login", bytesArg (encodeUtf8 password)]
+  ke1' <- ok . decode =<< fromArg ke1
+  (sst, ke2) <- ok =<< serverRespond cfg setup record (CredentialId (encodeUtf8 x.user)) ke1' (idsOf x)
+  ask c (["client-finish-login", state, bytesArg (encode ke2)] <> configArgs cfg (idsOf x)) >>= \case
+    Right [ke3, sessionKey, exportKey] -> do
+      ke3' <- ok . decode =<< fromArg ke3
+      ours <- ok (serverFinish sst ke3')
+      theirs <- fromArg sessionKey
+      encode ours `shouldBe` theirs
+      Right <$> fromArg exportKey
+    Right other -> expectationFailure ("a login's answer: " <> unwords other) >> pure (Left "")
+    Left e -> pure (Left e)
 
 -- | serenity-kit under Node, as two handles.
 data Serenity = Serenity Handle Handle
@@ -169,7 +275,10 @@ haskellLogsIn s setup record c password = do
       pure (Just (encode exportKey))
 
 spec :: Spec
-spec = describe "with @serenity-kit/opaque (opaque-ke as wasm), under Node" $ do
+spec = serenitySpec >> compiledSpec
+
+serenitySpec :: Spec
+serenitySpec = describe "with @serenity-kit/opaque (opaque-ke as wasm), under Node" $ do
   it "its client registers and logs in with this server, and fails with a wrong password" $ withSerenity $ \s ->
     forM_ [1 :: Int .. 8] $ \_ -> do
       c <- generate someCase
@@ -210,3 +319,73 @@ spec = describe "with @serenity-kit/opaque (opaque-ke as wasm), under Node" $ do
     ke1' <- ok . decode =<< bytes ke1
     (_, ke2) <- ok =<< serverRespond config setup Nothing (CredentialId (encodeUtf8 c.user)) ke1' (idsOf c)
     call s (["client-finish-login", state, b64 (encode ke2), textArg c.password] <> stretchArgs c) `shouldReturn` ["fail"]
+
+compiledSpec :: Spec
+compiledSpec = describe "with this package's client of the WebAssembly and JavaScript backends, compiled, under Node" $ do
+  it "registers and logs in with this server, and fails with a wrong password" $ withCompiled $ \c ->
+    forM_ [1 :: Int .. 8] $ \_ -> do
+      x <- generate someCase
+      cfg <- generate someConfig
+      setup <- ok =<< generateServerSetup
+      (record, exported) <- compiledRegisters c cfg setup x
+      compiledLogsIn c cfg setup (Just record) x x.password `shouldReturn` Right exported
+      compiledLogsIn c cfg setup (Just record) x (x.password <> "!") `shouldReturn` Left "EnvelopeRecoveryError"
+
+  it "reads a configuration as the client over libsodium does: a registration by either logs in with the other" $ withCompiled $ \c ->
+    forM_ [1 :: Int .. 8] $ \_ -> do
+      x <- generate someCase
+      cfg <- generate someConfig
+      setup <- ok =<< generateServerSetup
+      -- The compiled client registers; the client over libsodium logs in.
+      (record, exported) <- compiledRegisters c cfg setup x
+      (st, ke1) <- ok =<< clientStart (encodeUtf8 x.password)
+      (sst, ke2) <- ok =<< serverRespond cfg setup (Just record) (CredentialId (encodeUtf8 x.user)) ke1 (idsOf x)
+      (ke3, _, ExportKey ours) <- ok (clientFinish cfg st ke2 (idsOf x))
+      _ <- ok (serverFinish sst ke3)
+      encode (ExportKey ours) `shouldBe` exported
+      -- The client over libsodium registers; the compiled client logs in.
+      (st', request) <- ok =<< registrationRequest (encodeUtf8 x.password)
+      response <- ok (registrationResponse setup (CredentialId (encodeUtf8 x.user)) request)
+      (record', ExportKey exported') <- ok =<< finalizeRegistration cfg st' response (idsOf x)
+      compiledLogsIn c cfg setup (Just record') x x.password `shouldReturn` Right (encode (ExportKey exported'))
+
+  it "stretches with the memory it is given: a record made with other memory does not open" $ withCompiled $ \c -> do
+    x <- generate someCase
+    setup <- ok =<< generateServerSetup
+    let withMemory memLimit = Config {context = "", ksf = Argon2id {opsLimit = 1, memLimit}}
+    (record, exported) <- compiledRegisters c (withMemory 16384) setup x
+    compiledLogsIn c (withMemory 8192) setup (Just record) x x.password `shouldReturn` Left "EnvelopeRecoveryError"
+    -- Rounded down to the same 16 KiB, as libsodium rounds.
+    compiledLogsIn c (withMemory (16384 + 1023)) setup (Just record) x x.password `shouldReturn` Right exported
+
+  it "fails on the fake record of a login nobody has, as with a wrong password" $ withCompiled $ \c -> do
+    x <- generate someCase
+    setup <- ok =<< generateServerSetup
+    compiledLogsIn c config setup Nothing x x.password `shouldReturn` Left "EnvelopeRecoveryError"
+
+  it "says what it cannot do, and refuses what is invalid" $ withCompiled $ \c -> do
+    x <- generate someCase
+    setup <- ok =<< generateServerSetup
+    (record, _) <- compiledRegisters c config setup x
+    ask c ["client-start-login", bytesArg "\255\254"] `shouldReturn` Left "UnsupportedError"
+    ask c ["client-start-registration", bytesArg (BS.replicate 65535 97)] `shouldReturn` Left "InvalidInputError"
+    [state, ke1] <- ok =<< ask c ["client-start-login", bytesArg (encodeUtf8 x.password)]
+    ke1' <- ok . decode =<< fromArg ke1
+    (_, ke2) <- ok =<< serverRespond config setup (Just record) (CredentialId (encodeUtf8 x.user)) ke1' (idsOf x)
+    let finishWith cfg ids message = ask c (["client-finish-login", state, bytesArg message] <> configArgs cfg ids)
+        good = encode ke2
+    finishWith config {context = "OPAQUE-POC"} (idsOf x) good `shouldReturn` Left "UnsupportedError"
+    finishWith config {ksf = Identity} (idsOf x) good `shouldReturn` Left "UnsupportedError"
+    finishWith config Identities {client = Just "\255", server = (idsOf x).server} good `shouldReturn` Left "UnsupportedError"
+    finishWith config {ksf = Argon2id {opsLimit = 1, memLimit = 8191}} (idsOf x) good `shouldReturn` Left "KsfError"
+    finishWith config {ksf = Argon2id {opsLimit = 0, memLimit = 8192}} (idsOf x) good `shouldReturn` Left "KsfError"
+    finishWith config (idsOf x) (BS.take 100 good) `shouldReturn` Left "DeserializeError"
+    -- An evaluated element that is no element of the group.
+    finishWith config (idsOf x) (BS.replicate 32 255 <> BS.drop 32 good) `shouldReturn` Left "DeserializeError"
+    -- A wrong MAC of the server's: this client cannot tell it from a
+    -- wrong password, which the client over libsodium can.
+    finishWith config (idsOf x) (BS.init good <> BS.singleton (BS.last good + 1)) `shouldReturn` Left "EnvelopeRecoveryError"
+    -- The state still works after every refusal, and not once scrubbed.
+    Right [_, _, _] <- finishWith config (idsOf x) good
+    ask c ["scrub", state] `shouldReturn` Right []
+    finishWith config (idsOf x) good `shouldReturn` Left "InvalidInputError"

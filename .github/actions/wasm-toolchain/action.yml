@@ -1,0 +1,73 @@
+name: GHC's WebAssembly toolchain
+description: >
+  Installs wasm32-wasi-ghc and the wasi-sdk from one revision of
+  ghc-wasm-meta, and the pinned cabal, with a cache of each half. The jobs
+  that build for WebAssembly share it. It sets CABAL_DIR to ~/.cabal, so
+  that cabal's store is at ~/.cabal/store.
+
+inputs:
+  ghc-version:
+    description: The wasm compiler's version, as in with-compiler of the wasm project files.
+    required: true
+  meta-rev:
+    description: The ghc-wasm-meta revision the toolchain is installed from.
+    required: true
+  flavour:
+    description: The ghc-wasm-meta flavour of that compiler.
+    required: true
+  cabal-version:
+    description: The cabal to install and use.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Use ~/.cabal for cabal's files
+      shell: bash
+      run: echo "CABAL_DIR=$HOME/.cabal" >> "$GITHUB_ENV"
+
+    # Only ~/.ghc-wasm (the wasi-sdk, wasmtime, Node) is ours to cache:
+    # ghcup keeps the cross compiler under its own directory, which is
+    # cached apart.
+    - name: Cache the wasm sysroot
+      uses: actions/cache@v5
+      with:
+        path: ~/.ghc-wasm
+        key: ${{ runner.os }}-${{ runner.arch }}-ghc-wasm-sysroot-${{ inputs.meta-rev }}
+
+    - name: Cache the wasm compiler
+      uses: actions/cache@v5
+      with:
+        path: /usr/local/.ghcup/ghc/wasm32-wasi-${{ inputs.ghc-version }}
+        key: ${{ runner.os }}-${{ runner.arch }}-ghcup-wasm32-wasi-${{ inputs.ghc-version }}
+
+    # Each half checks for itself rather than trusting a cache hit, so a
+    # cache without a toolchain in it repairs itself.
+    - name: Install GHC's WebAssembly toolchain
+      shell: bash
+      env:
+        WASM_GHC_VERSION: ${{ inputs.ghc-version }}
+        GHC_WASM_META_REV: ${{ inputs.meta-rev }}
+        GHC_WASM_FLAVOUR: ${{ inputs.flavour }}
+        CABAL_VERSION: ${{ inputs.cabal-version }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/ghc-wasm-meta"
+        curl --fail --location --retry 5 --silent --show-error \
+          "https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/archive/$GHC_WASM_META_REV/ghc-wasm-meta-$GHC_WASM_META_REV.tar.gz" |
+          tar xz --strip-components=1 --directory "$RUNNER_TEMP/ghc-wasm-meta"
+        if [ ! -x "$HOME/.ghc-wasm/add_to_github_path.sh" ]; then
+          SKIP_GHC=1 FLAVOUR="$GHC_WASM_FLAVOUR" "$RUNNER_TEMP/ghc-wasm-meta/setup.sh"
+        fi
+        # shellcheck source=/dev/null
+        . ~/.ghc-wasm/env
+        if ! ghcup whereis cabal "$CABAL_VERSION" >/dev/null 2>&1; then
+          ghcup install cabal "$CABAL_VERSION"
+        fi
+        ghcup set cabal "$CABAL_VERSION"
+        if ! ghcup whereis ghc "wasm32-wasi-$WASM_GHC_VERSION" >/dev/null 2>&1; then
+          # shellcheck disable=SC2086
+          ghcup -s "file://$RUNNER_TEMP/ghc-wasm-meta/ghcup-wasm-0.0.9.yaml" install ghc "wasm32-wasi-$WASM_GHC_VERSION" -- $CONFIGURE_ARGS
+        fi
+        echo "$(ghcup whereis basedir)/ghc/wasm32-wasi-$WASM_GHC_VERSION/bin" >> "$GITHUB_PATH"
+        echo "$(ghcup whereis basedir)/bin" >> "$GITHUB_PATH"
+        ~/.ghc-wasm/add_to_github_path.sh
