@@ -24,6 +24,7 @@ module Test.Interop (spec) where
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM_, replicateM)
 import Crypto.OPAQUE.Internal
+import Crypto.OPAQUE.Kdf (hkdfExpand, hkdfExtract)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base64.URL qualified as Base64
@@ -389,3 +390,31 @@ compiledSpec = describe "with this package's client of the WebAssembly and JavaS
     Right [_, _, _] <- finishWith config (idsOf x) good
     ask c ["scrub", state] `shouldReturn` Right []
     finishWith config (idsOf x) good `shouldReturn` Left "InvalidInputError"
+
+  it "keeps the export key in WebCrypto: HKDF derives from the held key what it derives from this client's export key" $ withCompiled $ \c ->
+    forM_ [1 :: Int .. 4] $ \_ -> do
+      x <- generate someCase
+      cfg <- generate someConfig
+      setup <- ok =<< generateServerSetup
+      -- HKDF-SHA-512 with no salt and the compiled client's info, natively.
+      let derived exportKey = hkdfExpand (hkdfExtract BS.empty (encode exportKey)) "opaque-hs test" 64
+      -- The compiled client registers and holds its export key.
+      [state, request] <- ok =<< ask c ["client-start-registration", bytesArg (encodeUtf8 x.password)]
+      request' <- ok . decode =<< fromArg request
+      response <- ok (registrationResponse setup (CredentialId (encodeUtf8 x.user)) request')
+      [record, atRegistration] <- ok =<< ask c (["client-finish-registration-held", state, bytesArg (encode response)] <> configArgs cfg (idsOf x))
+      record' <- ok . decode =<< fromArg record
+      -- The client over libsodium logs in to that record: its export key.
+      (st, ke1) <- ok =<< clientStart (encodeUtf8 x.password)
+      (sst, ke2) <- ok =<< serverRespond cfg setup (Just record') (CredentialId (encodeUtf8 x.user)) ke1 (idsOf x)
+      (ke3, _, exportKey) <- ok (clientFinish cfg st ke2 (idsOf x))
+      _ <- ok (serverFinish sst ke3)
+      fromArg atRegistration `shouldReturn` derived exportKey
+      -- The compiled client logs in and holds the same key.
+      [state', ke1'] <- ok =<< ask c ["client-start-login", bytesArg (encodeUtf8 x.password)]
+      ke1'' <- ok . decode =<< fromArg ke1'
+      (sst', ke2') <- ok =<< serverRespond cfg setup (Just record') (CredentialId (encodeUtf8 x.user)) ke1'' (idsOf x)
+      [ke3', sessionKey, atLogin] <- ok =<< ask c (["client-finish-login-held", state', bytesArg (encode ke2')] <> configArgs cfg (idsOf x))
+      ours <- ok . serverFinish sst' =<< ok . decode =<< fromArg ke3'
+      fromArg sessionKey `shouldReturn` encode ours
+      fromArg atLogin `shouldReturn` derived exportKey

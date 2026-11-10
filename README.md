@@ -104,7 +104,9 @@ What it does not protect:
   state are JavaScript strings, which are immutable: `scrub` drops them
   and the engine frees them when it will. A `SessionKey` and an
   `ExportKey` are bytes `scrub` zeroes, but serenity-kit returned them as
-  strings first. Nothing is locked.
+  strings first. Nothing is locked. `Crypto.OPAQUE.Client.WebCrypto` keeps
+  the export key out of the program altogether, as a WebCrypto key that
+  cannot be exported.
 - Zeroing is not tested for timing or with a debugger; no OPAQUE
   implementation tests it.
 
@@ -272,6 +274,26 @@ the first time a registration or a login starts, and waits for it:
 Where neither gives the library, the step answers `ClientUnavailableError`
 and the console says why.
 
+**The export key in WebCrypto.** `Crypto.OPAQUE.Client.WebCrypto`, which
+exists on these two backends only, has the two finishing steps again:
+`finalizeRegistrationWebCrypto` and `clientFinishWebCrypto`. They give the
+export key not as bytes but as a WebCrypto `CryptoKey`: the key material of
+HKDF, not extractable, with the usages asked for (`DeriveKey`,
+`DeriveBits`). The JavaScript hands the key serenity-kit returned straight
+to `crypto.subtle.importKey`, so its bytes are never in the Haskell
+program, and the application's own JavaScript derives its keys from the
+`CryptoKey`:
+
+```haskell
+Right (ke3, sessionKey, held) <- clientFinishWebCrypto (DeriveKey :| []) config state ke2 defaultIdentities
+-- held :: Maybe ExportCryptoKey, a newtype over the JavaScript object
+```
+
+Importing a key is asynchronous in WebCrypto, so both steps are in `IO`.
+The key is `Nothing` where the page has no WebCrypto, which a browser
+gives only to pages served over HTTPS and to localhost; the step has
+still succeeded.
+
 **What differs from the client over libsodium.** The module's haddock has
 the list; in short:
 
@@ -330,6 +352,11 @@ clients read a `Config` alike.
 ```sh
 OPAQUE_HS_CLIENT="sh scripts/client.sh wasm serve" cabal test opaque-test   # or: js
 ```
+
+Both ways also run the steps that keep the export key in WebCrypto (Node
+has it): the held key cannot be exported, and what HKDF derives from it is
+what HKDF derives from the export key of this package's client over
+libsodium, logged in to the same record.
 
 Without `OPAQUE_HS_CLIENT` those tests are pending, and say so; with it, a
 client that does not start fails them.

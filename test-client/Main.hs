@@ -23,6 +23,15 @@
 -- > client-start-login PASSWORD                                         -> ok STATE KE1
 -- > client-finish-login STATE KE2 CONTEXT KSF CLIENT SERVER             -> ok KE3 SESSION_KEY EXPORT_KEY
 -- > scrub STATE                                                         -> ok
+-- > client-finish-registration-held STATE RESPONSE CONTEXT KSF CLIENT SERVER -> ok RECORD DERIVED
+-- > client-finish-login-held STATE KE2 CONTEXT KSF CLIENT SERVER             -> ok KE3 SESSION_KEY DERIVED
+--
+-- The two @-held@ commands are the steps of
+-- "Crypto.OPAQUE.Client.WebCrypto", which keep the export key in WebCrypto.
+-- Nobody can read that key, so they answer with what HKDF-SHA-512 derives
+-- from it, 64 bytes, with no salt and the info @opaque-hs test@; the native
+-- side derives the same from its own export key. DERIVED is @-@ where
+-- there is no WebCrypto.
 --
 -- A step that fails answers @fail@ and the 'Error' (@fail
 -- EnvelopeRecoveryError@), and a command that cannot be read answers
@@ -36,11 +45,13 @@ module Main (main) where
 import Control.Exception (throwIO)
 import Control.Monad (unless, when)
 import Crypto.OPAQUE.Client
+import Crypto.OPAQUE.Client.WebCrypto
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base64.URL qualified as Base64
 import Data.ByteString.Char8 qualified as BC
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -58,6 +69,10 @@ $( browserJS
      , ("js_registration_response", "opaque_hs_test_registration_response", Safe, [t|JSText -> JSText -> JSText -> IO JSText|])
      , ("js_start_login", "opaque_hs_test_start_login", Safe, [t|JSText -> JSText -> JSText -> JSText -> IO JSText|])
      , ("js_finish_login", "opaque_hs_test_finish_login", Safe, [t|JSText -> JSText -> IO JSText|])
+     , ("js_key_facts", "opaque_hs_test_key_facts", Safe, [t|JSVal -> IO JSText|])
+     , ("js_derive", "opaque_hs_test_derive", Safe, [t|JSVal -> JSText -> IO (Promise Text)|])
+     , ("js_export_refused", "opaque_hs_test_export_refused", Safe, [t|JSVal -> IO (Promise Bool)|])
+     , ("js_import", "opaque_hs_test_import", Safe, [t|JSText -> IO (Promise JSVal)|])
      ]
  )
 
@@ -130,6 +145,28 @@ command table = \case
           Just (LoggingIn state) ->
             answered (\(ke3, sessionKey, exportKey) -> pure [word (encode ke3), word (encode sessionKey), word (encode exportKey)]) (decode ke2' >>= \k -> clientFinish config state k ids)
           _ -> pure "error no such login"
+  ["client-finish-registration-held", name, response, context, ksf, client, server]
+    | Just config <- configArg context ksf
+    , Just ids <- Identities <$> identityArg client <*> identityArg server
+    , Just response' <- bytesArg response ->
+        lookupHeld name >>= \case
+          Just (Registering state) -> case decode response' of
+            Left e -> pure ("fail " <> show e)
+            Right response'' ->
+              finalizeRegistrationWebCrypto (DeriveBits :| []) config state response'' ids
+                >>= answered (\(record, key) -> (\derived -> [word (encode record), derived]) <$> derivedWord key)
+          _ -> pure "error no such registration"
+  ["client-finish-login-held", name, ke2, context, ksf, client, server]
+    | Just config <- configArg context ksf
+    , Just ids <- Identities <$> identityArg client <*> identityArg server
+    , Just ke2' <- bytesArg ke2 ->
+        lookupHeld name >>= \case
+          Just (LoggingIn state) -> case decode ke2' of
+            Left e -> pure ("fail " <> show e)
+            Right ke2'' ->
+              clientFinishWebCrypto (DeriveBits :| []) config state ke2'' ids
+                >>= answered (\(ke3, sessionKey, key) -> (\derived -> [word (encode ke3), word (encode sessionKey), derived]) <$> derivedWord key)
+          _ -> pure "error no such login"
   ["scrub", name] ->
     lookupHeld name >>= \case
       Just (Registering state) -> "ok" <$ scrub state
@@ -143,6 +180,18 @@ command table = \case
 
 word :: ByteString -> String
 word = ('b' :) . BC.unpack . Base64.encodeUnpadded
+
+-- | The info both sides derive with.
+derivedInfo :: Text
+derivedInfo = "opaque-hs test"
+
+-- | What HKDF-SHA-512 derives from a held export key, in base64url.
+derive :: ExportCryptoKey -> IO Text
+derive (ExportCryptoKey key) = wait =<< js_derive key (toJSText derivedInfo)
+
+-- | That, as a word of an answer: @-@ where no key is held.
+derivedWord :: Maybe ExportCryptoKey -> IO String
+derivedWord = maybe (pure "-") (fmap (('b' :) . T.unpack) . derive)
 
 bytesArg :: String -> Maybe ByteString
 bytesArg = \case
@@ -215,6 +264,41 @@ selfTest = do
 
   notUtf8 <- clientStart "\255\254"
   check "a password that is not UTF-8 is unsupported" (either (== UnsupportedError) (const False) notUtf8)
+
+  -- The same steps with the export key held in WebCrypto.
+  (registering', request') <- expectRight "a second registration starts" =<< registrationRequest password
+  response' <- expectRight "its response decodes" . decode =<< unbase64 . fromJSText =<< js_registration_response setup user (text64 (encode request'))
+  (record', heldAtRegistration) <-
+    expectRight "a registration finishes with its export key held" =<< finalizeRegistrationWebCrypto (DeriveBits :| []) config registering' response' defaultIdentities
+  registered <- maybe (failure "failed: there is WebCrypto, so a registration holds its export key") pure heldAtRegistration
+  let ExportCryptoKey registeredKey = registered
+  check "the held key is HKDF's, cannot be exported, and has the usage asked for" . (== "HKDF false deriveBits") . fromJSText =<< js_key_facts registeredKey
+  check "WebCrypto refuses to export the held key" =<< (wait =<< js_export_refused registeredKey)
+
+  (loggingIn', ke1') <- expectRight "a login to the second record starts" =<< clientStart password
+  (serverState', ke2') <- serverStarts (encode record') ke1'
+  (ke3', sessionKey', heldAtLogin) <-
+    expectRight "a login finishes with its export key held" =<< clientFinishWebCrypto (DeriveBits :| [DeriveKey]) config loggingIn' ke2' defaultIdentities
+  theirs' <- unbase64 . fromJSText =<< js_finish_login serverState' (text64 (encode ke3'))
+  check "the server agrees on the session key of that login" (encode sessionKey' == theirs')
+  loggedIn <- maybe (failure "failed: there is WebCrypto, so a login holds its export key") pure heldAtLogin
+  let ExportCryptoKey loggedInKey = loggedIn
+  check "a key held for two usages has both" . (== "HKDF false deriveKey,deriveBits") . fromJSText =<< js_key_facts loggedInKey
+  fromRegistration <- derive registered
+  fromLogin <- derive loggedIn
+  check "the key held at a login derives what the key held at the registration derives" (fromLogin == fromRegistration && T.length fromLogin == 86)
+  -- The step that gives the export key as bytes, on the same state and
+  -- KE2, gives the key that is held.
+  (_, _, plain) <- expectRight "the same login finishes with its export key as bytes" (clientFinish config loggingIn' ke2' defaultIdentities)
+  imported <- wait =<< js_import (text64 (encode plain))
+  fromBytes <- derive (ExportCryptoKey imported)
+  check "the held key is the export key" (fromBytes == fromLogin)
+  held <- clientFinishWebCrypto (DeriveBits :| []) config {context = "x"} loggingIn' ke2' defaultIdentities
+  check "a context is unsupported with the key held too" (either (== UnsupportedError) (const False) held)
+  (wrong', wrongKe1') <- expectRight "another login with a wrong password starts" =<< clientStart (password <> "?")
+  (_, wrongKe2') <- serverStarts (encode record') wrongKe1'
+  refused <- clientFinishWebCrypto (DeriveBits :| []) config wrong' wrongKe2' defaultIdentities
+  check "a wrong password fails with the key held too, and holds none" (either (== EnvelopeRecoveryError) (const False) refused)
 
   scrub loggingIn
   check "a scrubbed state is refused" . (== Left InvalidInputError) $

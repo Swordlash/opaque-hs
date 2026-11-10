@@ -167,7 +167,8 @@ jobs:
           # What only the browser backends compile, which the build below
           # would not miss, and the project files of the other backends
           # with the one they import.
-          for file in jsbits/opaque.js src-serenity/Crypto/OPAQUE/Client.hs test-client/Main.hs \
+          for file in jsbits/opaque.js src-serenity/Crypto/OPAQUE/Client.hs \
+            src-serenity/Crypto/OPAQUE/Client/Serenity.hs src-serenity/Crypto/OPAQUE/Client/WebCrypto.hs test-client/Main.hs \
             test-client/driver.js interop/client-wasm.mjs scripts/client.sh \
             cabal.project cabal-wasm.project cabal-wasm-client.project cabal-js-client.project; do
             test -f "$RUNNER_TEMP/from-sdist/$file" || { echo "The source distribution lacks $file." >&2; exit 1; }

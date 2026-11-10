@@ -70,3 +70,36 @@ function opaque_hs_test_finish_login(state, ke3) {
     return "";
   }
 }
+
+// What WebCrypto says of a key: its algorithm, whether it can be exported,
+// and its usages.
+function opaque_hs_test_key_facts(key) {
+  return key.algorithm.name + " " + key.extractable + " " + key.usages.join(",");
+}
+
+// HKDF-SHA-512 with no salt and this info over a key: a promise of 64
+// bytes, in base64url.
+function opaque_hs_test_derive(key, info) {
+  var how = { name: "HKDF", hash: "SHA-512", salt: new Uint8Array(0), info: new TextEncoder().encode(info) };
+  return crypto.subtle.deriveBits(how, key, 512).then(function (bits) {
+    return Buffer.from(bits).toString("base64url");
+  });
+}
+
+// A promise of whether WebCrypto refuses to export the key.
+function opaque_hs_test_export_refused(key) {
+  return crypto.subtle.exportKey("raw", key).then(
+    function () {
+      return false;
+    },
+    function () {
+      return true;
+    },
+  );
+}
+
+// Bytes, in base64url, as a key of HKDF: what the test compares a held
+// export key with.
+function opaque_hs_test_import(text) {
+  return crypto.subtle.importKey("raw", Buffer.from(text, "base64url"), "HKDF", false, ["deriveBits"]);
+}
