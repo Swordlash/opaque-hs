@@ -11,8 +11,9 @@ description:
   The protocol is written in Haskell; every primitive (ristretto255,
   SHA-512, HMAC-SHA-512, HKDF-SHA-512, Argon2id, random numbers) comes from
   libsodium. It is tested against the RFCs' test vectors, against
-  @serenity-kit/opaque (opaque-ke) and against libopaque. The README says
-  how to build it.
+  @serenity-kit/opaque (opaque-ke) and against libopaque. It builds
+  natively, and for GHC's WebAssembly backend with the flag
+  wasm-libsodium. The README says how.
 license:            MIT
 license-file:       LICENSE
 author:             Mateusz Goślinowski
@@ -43,6 +44,19 @@ flag older-libsodium
     flag (the default) the package needs libsodium 1.0.19 or later and uses
     its crypto_kdf_hkdf_sha512, and the test suite checks the polyfill
     against it.
+  default:     False
+  manual:      True
+
+flag wasm-libsodium
+  description:
+    On GHC's WebAssembly backend, build the package over a libsodium
+    compiled for wasm32-wasi (scripts/libsodium.sh install-wasm builds
+    one), which the linker finds through --extra-lib-dirs. Off by default:
+    without it the package is not buildable there. On wasm32-wasi libsodium
+    has no mlock and no guard pages, so a secret is zeroed but never
+    locked, and each costs about 320 KiB (WASI's 64 KiB pages); in a
+    browser any script on the page can read a wasm program's whole memory.
+    No effect on a native build.
   default:     False
   manual:      True
 
@@ -82,13 +96,21 @@ library
       base >= 4.20 && < 5,
       bytestring >= 0.11.5 && < 0.13,
       transformers >= 0.6 && < 0.7
-  -- Natively only: no libsodium is built for wasm32-wasi here, and a
-  -- browser is better served by @serenity-kit/opaque, from npm (the
-  -- README says why). Not buildable there, so that nothing built for the
-  -- browser can come to depend on this package.
-  if arch(wasm32)
+  -- Where libsodium comes from. Natively pkg-config finds it. For
+  -- wasm32-wasi cabal would run the host's pkg-config, which knows only
+  -- the host's libsodium, so with the flag wasm-libsodium the library is
+  -- linked by name and found through --extra-lib-dirs; without the flag
+  -- the package is not buildable there, so that a program for the browser
+  -- cannot come to depend on it by accident. GHC's JavaScript backend
+  -- links no C library at all.
+  if arch(javascript)
     buildable: False
-  if flag(older-libsodium)
+  if arch(wasm32)
+    if flag(wasm-libsodium)
+      extra-libraries: sodium
+    else
+      buildable: False
+  elif flag(older-libsodium)
     pkgconfig-depends: libsodium >= 1.0.18
   else
     pkgconfig-depends: libsodium >= 1.0.19
@@ -109,7 +131,7 @@ test-suite opaque-test
       Test.Memory
       Test.Interop
       Test.KdfAgreement
-  if arch(wasm32)
+  if arch(javascript) || (arch(wasm32) && !flag(wasm-libsodium))
     buildable: False
   -- The comparison of the HKDF polyfill with libsodium's own runs only
   -- where libsodium's is there: without older-libsodium.
@@ -117,15 +139,22 @@ test-suite opaque-test
     hs-source-dirs: test-older
   else
     hs-source-dirs: test-libsodium
+  -- The tests against @serenity-kit/opaque drive a Node process, which a
+  -- WASI program cannot start: there one pending example stands for them.
+  if arch(wasm32)
+    hs-source-dirs: test-wasm
+  else
+    hs-source-dirs: test-native
+    build-depends:
+        base64-bytestring >= 1.2 && < 1.3,
+        directory,
+        process,
+        text
   build-depends:
       base,
       bytestring,
       hspec >= 2.10 && < 2.12,
       QuickCheck >= 2.14 && < 2.20,
-      base64-bytestring >= 1.2 && < 1.3,
-      directory,
-      process,
-      text,
       opaque-hs
 
 -- This package against libopaque (scripts/reference.sh), with the same
@@ -141,7 +170,7 @@ test-suite opaque-reference
   other-modules:    Reference
   c-sources:        test-reference/cbits/shim.c
   cc-options:       -Wall -Wextra
-  if !flag(reference) || flag(older-libsodium) || arch(wasm32)
+  if !flag(reference) || flag(older-libsodium) || arch(wasm32) || arch(javascript)
     buildable: False
   else
     pkgconfig-depends: opaque-reference, libsodium >= 1.0.19

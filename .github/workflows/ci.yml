@@ -5,7 +5,9 @@ name: CI
 # own is 1.0.18 and the package needs 1.0.19. One job also builds against
 # that system library with the flag older-libsodium. The newest GHC's job
 # does the checks that need doing once: the comparison with libopaque, the
-# haddocks, and the package as Hackage would take it.
+# haddocks, and the package as Hackage would take it. One job builds for
+# GHC's WebAssembly backend, with the flag wasm-libsodium, and runs the
+# tests as a WASI module.
 
 on:
   push:
@@ -33,6 +35,12 @@ env:
   NEWEST_GHC: '9.14.1'
   # Part of the cabal store's cache key: bump it to start the store anew.
   CACHE_TAG: 'v1'
+  # The wasm compiler, and the ghc-wasm-meta revision it is installed
+  # from. Keep WASM_GHC_VERSION in step with with-compiler in
+  # cabal-wasm.project.
+  WASM_GHC_VERSION: '9.14.1.20260731'
+  GHC_WASM_META_REV: '358ea50b8496a69da6ce375c0c58bc049dbcb92d'
+  GHC_WASM_FLAVOUR: '9.14'
   FOURMOLU_VERSION: '0.21.0.0'
   # Of the release's fourmolu-<version>-linux-x86_64.zip.
   FOURMOLU_SHA256: 'aadf6931653df7b96f52014cf8eb4285a3e8778cd0b531499fc3ee013e1e00c7'
@@ -177,6 +185,87 @@ jobs:
       - name: Build and test
         run: cabal test opaque-test -folder-libsodium --test-show-details=direct
 
+  # GHC's WebAssembly backend: the package over a libsodium compiled for
+  # wasm32-wasi (the flag wasm-libsodium), and its tests run as a WASI
+  # module under wasmtime, which the toolchain brings.
+  wasm:
+    name: wasm (GHC 9.14.1)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use ~/.cabal for cabal's files
+        run: echo "CABAL_DIR=$HOME/.cabal" >> "$GITHUB_ENV"
+
+      # Only ~/.ghc-wasm (the wasi-sdk, wasmtime, Node) is ours to cache:
+      # ghcup keeps the cross compiler under its own directory, which is
+      # cached apart.
+      - name: Cache the wasm sysroot
+        uses: actions/cache@v5
+        with:
+          path: ~/.ghc-wasm
+          key: ${{ runner.os }}-${{ runner.arch }}-ghc-wasm-sysroot-${{ env.GHC_WASM_META_REV }}
+
+      - name: Cache the wasm compiler
+        uses: actions/cache@v5
+        with:
+          path: /usr/local/.ghcup/ghc/wasm32-wasi-${{ env.WASM_GHC_VERSION }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ghcup-wasm32-wasi-${{ env.WASM_GHC_VERSION }}
+
+      # Each half checks for itself rather than trusting a cache hit, so a
+      # cache without a toolchain in it repairs itself.
+      - name: Install GHC's WebAssembly toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/ghc-wasm-meta"
+          curl --fail --location --retry 5 --silent --show-error \
+            "https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/archive/$GHC_WASM_META_REV/ghc-wasm-meta-$GHC_WASM_META_REV.tar.gz" |
+            tar xz --strip-components=1 --directory "$RUNNER_TEMP/ghc-wasm-meta"
+          if [ ! -x "$HOME/.ghc-wasm/add_to_github_path.sh" ]; then
+            SKIP_GHC=1 FLAVOUR="$GHC_WASM_FLAVOUR" "$RUNNER_TEMP/ghc-wasm-meta/setup.sh"
+          fi
+          # shellcheck source=/dev/null
+          . ~/.ghc-wasm/env
+          if ! ghcup whereis cabal "$CABAL_VERSION" >/dev/null 2>&1; then
+            ghcup install cabal "$CABAL_VERSION"
+          fi
+          ghcup set cabal "$CABAL_VERSION"
+          if ! ghcup whereis ghc "wasm32-wasi-$WASM_GHC_VERSION" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            ghcup -s "file://$RUNNER_TEMP/ghc-wasm-meta/ghcup-wasm-0.0.9.yaml" install ghc "wasm32-wasi-$WASM_GHC_VERSION" -- $CONFIGURE_ARGS
+          fi
+          echo "$(ghcup whereis basedir)/ghc/wasm32-wasi-$WASM_GHC_VERSION/bin" >> "$GITHUB_PATH"
+          echo "$(ghcup whereis basedir)/bin" >> "$GITHUB_PATH"
+          ~/.ghc-wasm/add_to_github_path.sh
+
+      - name: Cache libsodium for wasm32-wasi
+        uses: actions/cache@v5
+        with:
+          path: .libsodium-wasm
+          key: ${{ runner.os }}-${{ runner.arch }}-libsodium-wasm-${{ env.GHC_WASM_META_REV }}-${{ hashFiles('scripts/libsodium.sh') }}
+
+      - name: Build libsodium for wasm32-wasi
+        run: sh scripts/libsodium.sh install-wasm
+
+      - name: Cache the cabal store
+        uses: actions/cache@v5
+        with:
+          path: ~/.cabal/store
+          key: ${{ runner.os }}-${{ runner.arch }}-cabal-store-${{ env.CACHE_TAG }}-cabal-${{ env.CABAL_VERSION }}-ghc-wasm32-wasi-${{ env.WASM_GHC_VERSION }}
+
+      - name: Build
+        run: |
+          cabal update
+          # shellcheck disable=SC2046
+          cabal --project-file=cabal-wasm.project build all $(sh scripts/libsodium.sh env-wasm)
+
+      # hspec's exit status is the module's. All of the suite runs but the
+      # tests that drive Node, which one pending example stands for.
+      - name: Test, as a WASI module
+        run: |
+          module=$(find dist-newstyle -name opaque-test.wasm | head -n 1)
+          test -n "$module"
+          wasmtime run "$module"
+
   format:
     runs-on: ubuntu-24.04
     steps:
@@ -208,4 +297,4 @@ jobs:
           echo "$HOME/fourmolu" >> "$GITHUB_PATH"
 
       - name: Check the formatting
-        run: fourmolu --mode check src test test-libsodium test-older test-reference
+        run: fourmolu --mode check src test test-libsodium test-older test-native test-wasm test-reference

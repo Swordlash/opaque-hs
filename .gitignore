@@ -4,3 +4,4 @@ node_modules/
 cabal.project.local
 *.swp
 .libsodium/
+.libsodium-wasm/
