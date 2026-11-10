@@ -1,0 +1,20 @@
+-- The project for GHC's WebAssembly backend: the package over a libsodium
+-- compiled for wasm32-wasi (the flag wasm-libsodium), and its tests.
+--
+--   . ~/.ghc-wasm/env
+--   sh scripts/libsodium.sh install-wasm
+--   cabal --project-file=cabal-wasm.project build all $(sh scripts/libsodium.sh env-wasm)
+--
+-- The compiler is the one ghc-wasm-meta installs; CI pins the same.
+import: cabal.project
+
+with-compiler: wasm32-wasi-ghc-9.14.1.20260731
+with-hc-pkg: wasm32-wasi-ghc-pkg-9.14.1.20260731
+
+-- As a program that uses Template Haskell is built: with a shared object
+-- of every package beside the static library, which is why the wasm
+-- libsodium is position-independent code.
+shared: True
+
+package opaque-hs
+  flags: +wasm-libsodium

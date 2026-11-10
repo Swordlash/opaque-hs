@@ -17,7 +17,7 @@ a scratch buffer zeroed after each step for intermediate values, and
 `scrub` to zero a value at once. HKDF is libsodium's (1.0.19 or later); the
 flag `older-libsodium`, off by default, builds against 1.0.18 with a Haskell
 HKDF, which the test suite compares with libsodium's own wherever the flag
-is off. Native only: not buildable for wasm32-wasi.
+is off.
 
 The package is named `opaque-hs` and has a repository of its own; it was
 the package `opaque` of the wiki at Swordlash/wiki. Its tests compare it
@@ -26,3 +26,10 @@ libopaque with liboprf, built from source by `scripts/reference.sh`, in the
 test suite `opaque-reference` (flag `reference`), step by step and with the
 same random values. `scripts/libsodium.sh` builds a libsodium new enough on
 a machine whose own is 1.0.18.
+
+The flag `wasm-libsodium`, off by default, builds the package for GHC's
+WebAssembly backend over a libsodium compiled for wasm32-wasi, which
+`scripts/libsodium.sh install-wasm` builds with the wasi-sdk. Without the
+flag the package is not buildable there. The test suite runs as a WASI
+module under `wasmtime`, all of it but the tests that drive Node. The
+package is not buildable for the JavaScript backend.

@@ -90,14 +90,21 @@ What it does not protect:
   systemd by default), which a server holding many login states can reach.
   A failure to lock is not an error: the memory is used unlocked, and may
   be swapped out.
+- **wasm32-wasi has no `mlock` and no guard pages.** There `sodium_malloc`
+  is `posix_memalign` with WASI's 64 KiB page, about 320 KiB per secret, and
+  locks nothing. The memory is still zeroed, but in a browser the whole
+  linear memory is readable by any script on the page.
 - Zeroing is not tested for timing or with a debugger; no OPAQUE
   implementation tests it.
 
 ## Building
 
-It builds natively, with GHC 9.10 to 9.14; CI builds and tests it on
-9.10.3, 9.12.4 and 9.14.1. It is not buildable for WebAssembly or for the
-JavaScript backend.
+It builds natively, with GHC 9.10 to 9.14 (CI builds and tests it on
+9.10.3, 9.12.4 and 9.14.1), and for GHC's WebAssembly backend with the flag
+`wasm-libsodium` (CI: `wasm32-wasi-ghc` 9.14.1). It is not buildable for
+the JavaScript backend, which links no C library.
+
+### Natively
 
 It needs libsodium 1.0.19 or later, found through `pkg-config`, for its
 HKDF-SHA-512:
@@ -129,10 +136,44 @@ are two ways:
   cabal build -folder-libsodium
   ```
 
-Why not WebAssembly: there `sodium_malloc` would have no `mlock` and no
-guard pages, and cost about 320 KiB per secret (WASI's 64 KiB pages), and
-any script on a page can read a wasm program's whole memory. A browser
-client is better served by an OPAQUE implementation built for it, such as
+### WebAssembly
+
+With the cabal flag `wasm-libsodium` (off by default) the package builds
+for wasm32-wasi over a libsodium compiled for it. Without the flag it is
+not buildable there, so that a program for the browser cannot come to
+depend on it by accident: read [the caveats](#memory) first.
+
+It needs GHC's WebAssembly toolchain,
+[ghc-wasm-meta](https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta),
+which brings `wasm32-wasi-ghc` and the wasi-sdk. libsodium publishes no
+build for wasm32-wasi, so the script here compiles the same pinned release
+with the wasi-sdk, under `.libsodium-wasm`:
+
+```sh
+. ~/.ghc-wasm/env
+sh scripts/libsodium.sh install-wasm
+cabal --project-file=cabal-wasm.project build all $(sh scripts/libsodium.sh env-wasm)
+```
+
+`env-wasm` prints `--extra-lib-dirs=…` and `--extra-include-dirs=…`: cabal
+runs the host's `pkg-config`, which knows nothing of a wasm library, so the
+package links `-lsodium` there and has to be told where it is. In a project
+of your own, turn the flag on for the package and give the same two
+directories:
+
+```cabal
+package opaque-hs
+  flags: +wasm-libsodium
+  extra-lib-dirs: /path/to/.libsodium-wasm/lib
+  extra-include-dirs: /path/to/.libsodium-wasm/include
+```
+
+The result is a WASI module: it runs under `wasmtime`, under Node, and in
+a browser with a WASI shim. Random numbers come from WASI's `random_get`.
+
+A browser client that does not need this package's server, its API or its
+tests' guarantees may be better served by an OPAQUE implementation built
+for the browser, such as
 [`@serenity-kit/opaque`](https://github.com/serenity-kit/opaque), which
 this package is tested against.
 
@@ -156,6 +197,17 @@ cabal test opaque-test
   this package's server, this package's client with its server, and a
   registration by one client with a login by the other. Without Node or
   without `npm ci` these tests are skipped, and say so.
+
+For wasm32-wasi the same test suite is one module, run under `wasmtime`
+(or Node):
+
+```sh
+wasmtime run "$(find dist-newstyle -name opaque-test.wasm)"
+```
+
+There it runs everything but the tests against `@serenity-kit/opaque`,
+which drive a Node process and a WASI program starts none: one pending
+example stands for them.
 
 A second test suite compares the package with a reference implementation,
 [libopaque](https://github.com/stef/libopaque) (in C, over
