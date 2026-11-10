@@ -9,7 +9,8 @@ name: CI
 # GHC's WebAssembly backend, with the flag wasm-libsodium, and runs the
 # tests as a WASI module. Two jobs build the client of the browser backends
 # (WebAssembly without the flag, and the JavaScript backend), and run it
-# under Node against the native server and client.
+# under Node against the native server and client. One job builds and runs
+# the README's example.
 
 on:
   push:
@@ -397,6 +398,42 @@ jobs:
           backend: js
           host-ghc: ${{ env.NEWEST_GHC }}
 
+  # The example of the README, examples/servant: a servant server and its
+  # client in one program, which exits with a failure when a step does not
+  # go as it should. It has a project file and a store of its own, so that
+  # the jobs above do not build servant and warp.
+  example:
+    name: example (servant)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: ${{ env.NEWEST_GHC }}
+          cabal-version: ${{ env.CABAL_VERSION }}
+
+      - name: Cache libsodium
+        uses: actions/cache@v5
+        with:
+          path: .libsodium
+          key: ${{ runner.os }}-${{ runner.arch }}-libsodium-${{ hashFiles('scripts/libsodium.sh') }}
+
+      - name: Build libsodium
+        run: |
+          sh scripts/libsodium.sh install
+          sh scripts/libsodium.sh env >> "$GITHUB_ENV"
+
+      - name: Cache the cabal store
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cabal-store-${{ env.CACHE_TAG }}-cabal-${{ env.CABAL_VERSION }}-ghc-${{ env.NEWEST_GHC }}-example
+
+      - name: Build and run the example
+        run: cabal --project-file=cabal-examples.project run opaque-hs-servant-example
+
   format:
     runs-on: ubuntu-24.04
     steps:
@@ -428,4 +465,4 @@ jobs:
           echo "$HOME/fourmolu" >> "$GITHUB_PATH"
 
       - name: Check the formatting
-        run: fourmolu --mode check src src-libsodium src-serenity test test-client test-libsodium test-older test-native test-wasm test-reference
+        run: fourmolu --mode check src src-libsodium src-serenity test test-client test-libsodium test-older test-native test-wasm test-reference examples

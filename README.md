@@ -427,6 +427,36 @@ in through OPAQUE:
   of the wiki's own that is older than `Crypto.OPAQUE.Client`. There the
   export key becomes a WebCrypto key that wraps the user's own keys.
 
+### An example: a servant server and its client
+
+[`examples/servant/Main.hs`](examples/servant/Main.hs) is one program with
+both sides. It starts a small HTTP server, written with servant, that
+keeps everything in memory, runs a client against it while the server is
+up, and prints what each request came to:
+
+```sh
+cabal --project-file=cabal-examples.project run opaque-hs-servant-example
+```
+
+```
+register ada: registered
+register ada again: refused by the server: HTTP 409
+log in as ada with a wrong password: refused by the client: EnvelopeRecoveryError
+log in as grace, whom the server does not know: refused by the client: EnvelopeRecoveryError
+log in as ada: logged in, with a token
+GET /me with the token: Ada Lovelace, born 1815-12-10
+GET /me without a token: refused by the server: HTTP 401
+```
+
+A registration is two requests and a login is two, one round trip of
+OPAQUE's messages each; the user's first name, last name and date of birth
+go with the registration's second request. A login ends with a token, and
+`GET /me` gives the registered details back to whoever sends it. The server
+answers a login for a name it does not know with the fake record, so the
+client fails there exactly as with a wrong password. The comments say what
+a real application adds: TLS, a database, a time limit on a login under
+way.
+
 ### The steps
 
 A program that is only ever a client imports `Crypto.OPAQUE.Client`, on

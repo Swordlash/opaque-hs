@@ -48,3 +48,8 @@ what the two implementations share (`Config`, `Ksf`, `Identities`, `Error`,
 client is tested under Node: by itself against serenity-kit's server, and
 by `opaque-test` against this package's server and its client over
 libsodium (`OPAQUE_HS_CLIENT`, `scripts/client.sh`).
+
+`examples/servant` is an example of the package in one program: a servant
+server that keeps its users in memory, and a client that registers, logs
+in, and asks for what only a signed-in user gets
+(`cabal --project-file=cabal-examples.project run opaque-hs-servant-example`).
