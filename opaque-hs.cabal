@@ -13,7 +13,9 @@ description:
   libsodium. It is tested against the RFCs' test vectors, against
   @serenity-kit/opaque (opaque-ke) and against libopaque. It builds
   natively, and for GHC's WebAssembly backend with the flag
-  wasm-libsodium. The README says how.
+  wasm-libsodium. Without that flag there, and on GHC's JavaScript backend,
+  the package is the client alone, Crypto.OPAQUE.Client, with the same
+  names and types, calling @serenity-kit/opaque. The README says how.
 license:            MIT
 license-file:       LICENSE
 author:             Mateusz Goślinowski
@@ -24,11 +26,18 @@ category:           Cryptography
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
                     README.md
-extra-source-files: interop/serenity.mjs
+extra-source-files: cabal-js-client.project
+                    cabal-wasm-client.project
+                    cabal-wasm.project
+                    interop/client-wasm.mjs
+                    interop/serenity.mjs
+                    jsbits/opaque.js
                     package-lock.json
                     package.json
+                    scripts/client.sh
                     scripts/libsodium.sh
                     scripts/reference.sh
+                    test-client/driver.js
 tested-with:        GHC == 9.10.3, GHC == 9.12.4, GHC == 9.14.1
 
 source-repository head
@@ -49,10 +58,12 @@ flag older-libsodium
 
 flag wasm-libsodium
   description:
-    On GHC's WebAssembly backend, build the package over a libsodium
+    On GHC's WebAssembly backend, build the whole package over a libsodium
     compiled for wasm32-wasi (scripts/libsodium.sh install-wasm builds
     one), which the linker finds through --extra-lib-dirs. Off by default:
-    without it the package is not buildable there. On wasm32-wasi libsodium
+    without it the package is there the client alone, Crypto.OPAQUE.Client,
+    which calls @serenity-kit/opaque, so that a program for the browser
+    does not come to carry libsodium by accident. On wasm32-wasi libsodium
     has no mlock and no guard pages, so a secret is zeroed but never
     locked, and each costs about 320 KiB (WASI's 64 KiB pages); in a
     browser any script on the page can read a wasm program's whole memory.
@@ -85,37 +96,48 @@ library
   import:           shared
   hs-source-dirs:   src
   exposed-modules:
-      Crypto.OPAQUE
-      Crypto.OPAQUE.Internal
-      Crypto.OPAQUE.Kdf
-      Crypto.OPAQUE.Kdf.Polyfill
-      Crypto.OPAQUE.OPRF
-      Crypto.OPAQUE.Secret
-      Crypto.OPAQUE.Sodium
+      Crypto.OPAQUE.Client
+      Crypto.OPAQUE.Types
   build-depends:
       base >= 4.20 && < 5,
-      bytestring >= 0.11.5 && < 0.13,
-      transformers >= 0.6 && < 0.7
-  -- Where libsodium comes from. Natively pkg-config finds it. For
-  -- wasm32-wasi cabal would run the host's pkg-config, which knows only
-  -- the host's libsodium, so with the flag wasm-libsodium the library is
-  -- linked by name and found through --extra-lib-dirs; without the flag
-  -- the package is not buildable there, so that a program for the browser
-  -- cannot come to depend on it by accident. GHC's JavaScript backend
-  -- links no C library at all.
-  if arch(javascript)
-    buildable: False
-  if arch(wasm32)
-    if flag(wasm-libsodium)
-      extra-libraries: sodium
-    else
-      buildable: False
-  elif flag(older-libsodium)
-    pkgconfig-depends: libsodium >= 1.0.18
+      bytestring >= 0.11.5 && < 0.13
+  -- Two implementations. Where libsodium is, the package is its own
+  -- protocol code over it, and Crypto.OPAQUE.Client its client. Where it
+  -- is not (GHC's JavaScript backend, which links no C library, and its
+  -- WebAssembly backend without the flag wasm-libsodium), the package is
+  -- Crypto.OPAQUE.Client alone, calling @serenity-kit/opaque through
+  -- haskell-halogen-jsbits: jsbits/opaque.js is embedded in a WebAssembly
+  -- program, and linked by the JavaScript backend.
+  if arch(javascript) || (arch(wasm32) && !flag(wasm-libsodium))
+    hs-source-dirs: src-serenity
+    build-depends:
+        haskell-halogen-jsbits >= 0.1 && < 0.2
+    if arch(javascript)
+      js-sources: jsbits/opaque.js
   else
-    pkgconfig-depends: libsodium >= 1.0.19
-  if flag(older-libsodium)
-    cpp-options: -DOLDER_LIBSODIUM
+    hs-source-dirs: src-libsodium
+    exposed-modules:
+        Crypto.OPAQUE
+        Crypto.OPAQUE.Internal
+        Crypto.OPAQUE.Kdf
+        Crypto.OPAQUE.Kdf.Polyfill
+        Crypto.OPAQUE.OPRF
+        Crypto.OPAQUE.Secret
+        Crypto.OPAQUE.Sodium
+    build-depends:
+        transformers >= 0.6 && < 0.7
+    -- Where libsodium comes from. Natively pkg-config finds it. For
+    -- wasm32-wasi cabal would run the host's pkg-config, which knows only
+    -- the host's libsodium, so there the library is linked by name and
+    -- found through --extra-lib-dirs.
+    if arch(wasm32)
+      extra-libraries: sodium
+    elif flag(older-libsodium)
+      pkgconfig-depends: libsodium >= 1.0.18
+    else
+      pkgconfig-depends: libsodium >= 1.0.19
+    if flag(older-libsodium)
+      cpp-options: -DOLDER_LIBSODIUM
 
 test-suite opaque-test
   import:           shared
@@ -180,3 +202,31 @@ test-suite opaque-reference
       hspec >= 2.10 && < 2.12,
       QuickCheck >= 2.14 && < 2.20,
       opaque-hs
+
+-- The client of the WebAssembly and JavaScript backends, compiled, as a
+-- program for Node. Run with no argument it tests itself against
+-- serenity-kit's server. Run with the argument serve it answers one command
+-- a line, and the native opaque-test drives it against this package's
+-- server and client (test-native/Test/Interop.hs, scripts/client.sh). On
+-- WebAssembly it is a reactor that exports hs_test, since a command's main
+-- cannot wait for a JavaScript promise; interop/client-wasm.mjs runs it.
+test-suite opaque-client-test
+  import:           shared
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test-client
+  main-is:          Main.hs
+  if arch(javascript) || (arch(wasm32) && !flag(wasm-libsodium))
+    build-depends:
+        base,
+        base64-bytestring >= 1.2 && < 1.3,
+        bytestring,
+        containers >= 0.6 && < 0.9,
+        haskell-halogen-jsbits,
+        opaque-hs,
+        text
+    if arch(javascript)
+      js-sources: test-client/driver.js
+    if arch(wasm32)
+      ghc-options: -no-hs-main -optl-mexec-model=reactor "-optl-Wl,--export=hs_test"
+  else
+    buildable: False

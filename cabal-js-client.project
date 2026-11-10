@@ -1,0 +1,31 @@
+-- The project for GHC's JavaScript backend: the package as the client
+-- alone, Crypto.OPAQUE.Client, which calls @serenity-kit/opaque, and its
+-- test program.
+--
+--   npm ci
+--   cabal --project-file=cabal-js-client.project --builddir=dist-newstyle/js-client build all
+--   sh scripts/client.sh js
+--
+-- The compiler is ghcup's (its cross channel), installed under emsdk; the
+-- README says how, and CI pins the same.
+import: cabal.project
+
+with-compiler: javascript-unknown-ghcjs-ghc-9.12.2
+with-hc-pkg: javascript-unknown-ghcjs-ghc-pkg-9.12.2
+
+-- No C source of a dependency is compiled with emcc into the program: the
+-- client needs none of them, and the link step would otherwise run emcc.
+-- It has to be given to every package, since the link is the program's.
+package *
+  ghc-options: -ddisable-js-c-sources
+
+-- haskell-halogen-jsbits declares the JavaScript the client calls. It is
+-- not on Hackage: it comes from one pinned commit of haskell-halogen. Bump
+-- the tag deliberately, in its own commit, here and in
+-- cabal-wasm-client.project.
+source-repository-package
+  type: git
+  location: https://github.com/Swordlash/haskell-halogen
+  tag: 3459805e6476781961e2d754fe3574af0345ef09
+  subdir:
+    jsbits
