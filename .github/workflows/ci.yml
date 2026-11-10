@@ -181,10 +181,13 @@ jobs:
             curl --fail --location --retry 5 --silent --show-error --output "$zip" \
               "https://github.com/fourmolu/fourmolu/releases/download/v$FOURMOLU_VERSION/fourmolu-$FOURMOLU_VERSION-linux-x86_64.zip"
             printf '%s  %s\n' "$FOURMOLU_SHA256" "$zip" | sha256sum --check --status
-            unzip -o -q "$zip" -d ~/fourmolu
-            chmod +x ~/fourmolu/fourmolu
+            # The binary is inside a directory of the zip; -j leaves the
+            # directory out.
+            unzip -q -o -j "$zip" '*/fourmolu' -d ~/fourmolu
+            chmod 755 ~/fourmolu/fourmolu
             rm "$zip"
           fi
+          ~/fourmolu/fourmolu --version
           echo "$HOME/fourmolu" >> "$GITHUB_PATH"
 
       - name: Check the formatting
