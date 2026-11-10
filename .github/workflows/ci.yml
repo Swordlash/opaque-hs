@@ -7,7 +7,9 @@ name: CI
 # does the checks that need doing once: the comparison with libopaque, the
 # haddocks, and the package as Hackage would take it. One job builds for
 # GHC's WebAssembly backend, with the flag wasm-libsodium, and runs the
-# tests as a WASI module.
+# tests as a WASI module. Two jobs build the client of the browser backends
+# (WebAssembly without the flag, and the JavaScript backend), and run it
+# under Node against the native server and client.
 
 on:
   push:
@@ -41,6 +43,11 @@ env:
   WASM_GHC_VERSION: '9.14.1.20260731'
   GHC_WASM_META_REV: '358ea50b8496a69da6ce375c0c58bc049dbcb92d'
   GHC_WASM_FLAVOUR: '9.14'
+  # The JavaScript cross compiler, from ghcup's cross channel, and the
+  # emsdk it is installed and used under. Keep GHCJS_VERSION in step with
+  # with-compiler in cabal-js-client.project.
+  GHCJS_VERSION: '9.12.2'
+  EM_VERSION: '3.1.74'
   FOURMOLU_VERSION: '0.21.0.0'
   # Of the release's fourmolu-<version>-linux-x86_64.zip.
   FOURMOLU_SHA256: 'aadf6931653df7b96f52014cf8eb4285a3e8778cd0b531499fc3ee013e1e00c7'
@@ -144,6 +151,13 @@ jobs:
           cabal sdist --output-directory "$RUNNER_TEMP/sdist"
           mkdir "$RUNNER_TEMP/from-sdist"
           tar xzf "$RUNNER_TEMP"/sdist/opaque-hs-*.tar.gz --strip-components=1 --directory "$RUNNER_TEMP/from-sdist"
+          # What only the browser backends compile, which the build below
+          # would not miss.
+          for file in jsbits/opaque.js src-serenity/Crypto/OPAQUE/Client.hs test-client/Main.hs \
+            test-client/driver.js interop/client-wasm.mjs scripts/client.sh \
+            cabal-wasm-client.project cabal-js-client.project; do
+            test -f "$RUNNER_TEMP/from-sdist/$file" || { echo "The source distribution lacks $file." >&2; exit 1; }
+          done
           cd "$RUNNER_TEMP/from-sdist"
           cabal build --enable-tests
 
@@ -194,48 +208,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Use ~/.cabal for cabal's files
-        run: echo "CABAL_DIR=$HOME/.cabal" >> "$GITHUB_ENV"
-
-      # Only ~/.ghc-wasm (the wasi-sdk, wasmtime, Node) is ours to cache:
-      # ghcup keeps the cross compiler under its own directory, which is
-      # cached apart.
-      - name: Cache the wasm sysroot
-        uses: actions/cache@v5
+      - uses: ./.github/actions/wasm-toolchain
         with:
-          path: ~/.ghc-wasm
-          key: ${{ runner.os }}-${{ runner.arch }}-ghc-wasm-sysroot-${{ env.GHC_WASM_META_REV }}
-
-      - name: Cache the wasm compiler
-        uses: actions/cache@v5
-        with:
-          path: /usr/local/.ghcup/ghc/wasm32-wasi-${{ env.WASM_GHC_VERSION }}
-          key: ${{ runner.os }}-${{ runner.arch }}-ghcup-wasm32-wasi-${{ env.WASM_GHC_VERSION }}
-
-      # Each half checks for itself rather than trusting a cache hit, so a
-      # cache without a toolchain in it repairs itself.
-      - name: Install GHC's WebAssembly toolchain
-        run: |
-          mkdir -p "$RUNNER_TEMP/ghc-wasm-meta"
-          curl --fail --location --retry 5 --silent --show-error \
-            "https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/archive/$GHC_WASM_META_REV/ghc-wasm-meta-$GHC_WASM_META_REV.tar.gz" |
-            tar xz --strip-components=1 --directory "$RUNNER_TEMP/ghc-wasm-meta"
-          if [ ! -x "$HOME/.ghc-wasm/add_to_github_path.sh" ]; then
-            SKIP_GHC=1 FLAVOUR="$GHC_WASM_FLAVOUR" "$RUNNER_TEMP/ghc-wasm-meta/setup.sh"
-          fi
-          # shellcheck source=/dev/null
-          . ~/.ghc-wasm/env
-          if ! ghcup whereis cabal "$CABAL_VERSION" >/dev/null 2>&1; then
-            ghcup install cabal "$CABAL_VERSION"
-          fi
-          ghcup set cabal "$CABAL_VERSION"
-          if ! ghcup whereis ghc "wasm32-wasi-$WASM_GHC_VERSION" >/dev/null 2>&1; then
-            # shellcheck disable=SC2086
-            ghcup -s "file://$RUNNER_TEMP/ghc-wasm-meta/ghcup-wasm-0.0.9.yaml" install ghc "wasm32-wasi-$WASM_GHC_VERSION" -- $CONFIGURE_ARGS
-          fi
-          echo "$(ghcup whereis basedir)/ghc/wasm32-wasi-$WASM_GHC_VERSION/bin" >> "$GITHUB_PATH"
-          echo "$(ghcup whereis basedir)/bin" >> "$GITHUB_PATH"
-          ~/.ghc-wasm/add_to_github_path.sh
+          ghc-version: ${{ env.WASM_GHC_VERSION }}
+          meta-rev: ${{ env.GHC_WASM_META_REV }}
+          flavour: ${{ env.GHC_WASM_FLAVOUR }}
+          cabal-version: ${{ env.CABAL_VERSION }}
 
       - name: Cache libsodium for wasm32-wasi
         uses: actions/cache@v5
@@ -265,6 +243,159 @@ jobs:
           module=$(find dist-newstyle -name opaque-test.wasm | head -n 1)
           test -n "$module"
           wasmtime run "$module"
+
+  # The client of the browser backends on GHC's WebAssembly backend,
+  # without the flag wasm-libsodium: Crypto.OPAQUE.Client over
+  # @serenity-kit/opaque. The compiled client runs under Node, by itself
+  # and against the native server and client, so the job also builds the
+  # native test suite.
+  wasm-client:
+    name: wasm client (GHC 9.14.1)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/wasm-toolchain
+        with:
+          ghc-version: ${{ env.WASM_GHC_VERSION }}
+          meta-rev: ${{ env.GHC_WASM_META_REV }}
+          flavour: ${{ env.GHC_WASM_FLAVOUR }}
+          cabal-version: ${{ env.CABAL_VERSION }}
+
+      # This job's dependencies for both compilers: the client's for
+      # wasm32-wasi and the native test suite's.
+      - name: Cache the cabal store
+        uses: actions/cache@v5
+        with:
+          path: ~/.cabal/store
+          key: ${{ runner.os }}-${{ runner.arch }}-cabal-store-${{ env.CACHE_TAG }}-cabal-${{ env.CABAL_VERSION }}-ghc-wasm32-wasi-${{ env.WASM_GHC_VERSION }}-client-host-${{ env.NEWEST_GHC }}
+
+      - name: Install @serenity-kit/opaque
+        run: npm ci --ignore-scripts
+
+      # The compiler is named on the command line too: with a native GHC
+      # on PATH, cabal may check that GHC's ghc-pkg against the cross
+      # compiler and refuse ("Version mismatch between ghc and ghc-pkg"),
+      # which with-hc-pkg in the project file does not prevent.
+      - name: Build the client
+        run: |
+          cabal update
+          cabal --project-file=cabal-wasm-client.project --builddir=dist-newstyle/wasm-client \
+            --with-compiler="$(command -v "wasm32-wasi-ghc-$WASM_GHC_VERSION")" \
+            --with-hc-pkg="$(command -v "wasm32-wasi-ghc-pkg-$WASM_GHC_VERSION")" \
+            build all
+
+      - uses: ./.github/actions/client-test
+        with:
+          backend: wasm
+          host-ghc: ${{ env.NEWEST_GHC }}
+
+  # The same client on GHC's JavaScript backend.
+  js-client:
+    name: js client (GHC 9.12.2)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use ~/.cabal for cabal's files
+        run: echo "CABAL_DIR=$HOME/.cabal" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # emsdk is installed by hand, at a path that is the same in every
+      # run: ghcup records the absolute path of emcc in the cross
+      # compiler's settings, so a compiler restored from its cache works
+      # only if emcc is still where it was when the compiler was installed.
+      - name: Cache emsdk
+        uses: actions/cache@v5
+        with:
+          path: ~/emsdk
+          key: ${{ runner.os }}-${{ runner.arch }}-emsdk-${{ env.EM_VERSION }}
+
+      - name: Install emsdk
+        run: |
+          if [ ! -d "$HOME/emsdk/.git" ]; then
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          fi
+          cd "$HOME/emsdk"
+          ./emsdk install "$EM_VERSION"
+          ./emsdk activate "$EM_VERSION"
+
+      # EM_CONFIG is passed on only when it has a value: an empty one is
+      # taken as the path of the configuration, and emcc then finds none.
+      - name: Activate emsdk
+        run: |
+          # shellcheck source=/dev/null
+          . "$HOME/emsdk/emsdk_env.sh" >/dev/null 2>&1
+          echo "EMSDK=$EMSDK" >> "$GITHUB_ENV"
+          if [ -n "${EM_CONFIG:-}" ]; then
+            echo "EM_CONFIG=$EM_CONFIG" >> "$GITHUB_ENV"
+          elif [ -f "$EMSDK/.emscripten" ]; then
+            echo "EM_CONFIG=$EMSDK/.emscripten" >> "$GITHUB_ENV"
+          fi
+          {
+            echo "$EMSDK"
+            echo "$EMSDK/upstream/emscripten"
+          } >> "$GITHUB_PATH"
+
+      - name: Check emsdk
+        run: |
+          command -v emcc emconfigure
+          emcc --check
+
+      # Only the one cross compiler under ghcup's directory, which also
+      # holds the image's own GHCs. The compiler names emcc by its path, so
+      # the key names the emsdk it was installed under.
+      - name: Cache the JavaScript compiler
+        uses: actions/cache@v5
+        with:
+          path: /usr/local/.ghcup/ghc/javascript-unknown-ghcjs-${{ env.GHCJS_VERSION }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ghcup-ghcjs-${{ env.GHCJS_VERSION }}-emsdk-${{ env.EM_VERSION }}-home
+
+      # With the ghcup the runner's image ships, as the wasm jobs do. The
+      # compiler's own bin directory goes on PATH, not ghcup's: the links
+      # in ghcup's are made at install time, and are not there when the
+      # compiler comes from the cache.
+      - name: Install GHC's JavaScript toolchain
+        run: |
+          ghcup config add-release-channel cross
+          if ! ghcup whereis cabal "$CABAL_VERSION" >/dev/null 2>&1; then
+            ghcup install cabal "$CABAL_VERSION"
+          fi
+          ghcup set cabal "$CABAL_VERSION"
+          if ! ghcup whereis ghc "javascript-unknown-ghcjs-$GHCJS_VERSION" >/dev/null 2>&1; then
+            emconfigure ghcup install ghc "javascript-unknown-ghcjs-$GHCJS_VERSION"
+          fi
+          echo "$(ghcup whereis basedir)/ghc/javascript-unknown-ghcjs-$GHCJS_VERSION/bin" >> "$GITHUB_PATH"
+          echo "$(ghcup whereis basedir)/bin" >> "$GITHUB_PATH"
+
+      # This job's dependencies for both compilers: the client's for the
+      # JavaScript backend and the native test suite's.
+      - name: Cache the cabal store
+        uses: actions/cache@v5
+        with:
+          path: ~/.cabal/store
+          key: ${{ runner.os }}-${{ runner.arch }}-cabal-store-${{ env.CACHE_TAG }}-cabal-${{ env.CABAL_VERSION }}-ghc-javascript-${{ env.GHCJS_VERSION }}-client-host-${{ env.NEWEST_GHC }}
+
+      - name: Install @serenity-kit/opaque
+        run: npm ci --ignore-scripts
+
+      # The compiler is named on the command line, as in the wasm client's
+      # job.
+      - name: Build the client
+        run: |
+          cabal update
+          cabal --project-file=cabal-js-client.project --builddir=dist-newstyle/js-client \
+            --with-compiler="$(command -v "javascript-unknown-ghcjs-ghc-$GHCJS_VERSION")" \
+            --with-hc-pkg="$(command -v "javascript-unknown-ghcjs-ghc-pkg-$GHCJS_VERSION")" \
+            build all
+
+      - uses: ./.github/actions/client-test
+        with:
+          backend: js
+          host-ghc: ${{ env.NEWEST_GHC }}
 
   format:
     runs-on: ubuntu-24.04
@@ -297,4 +428,4 @@ jobs:
           echo "$HOME/fourmolu" >> "$GITHUB_PATH"
 
       - name: Check the formatting
-        run: fourmolu --mode check src test test-libsodium test-older test-native test-wasm test-reference
+        run: fourmolu --mode check src src-libsodium src-serenity test test-client test-libsodium test-older test-native test-wasm test-reference

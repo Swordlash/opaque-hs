@@ -1,0 +1,76 @@
+name: Test the compiled client
+description: >
+  Runs the client of a browser backend (test-client, built by the job
+  before this action) under Node: by itself, and driven by the native test
+  suite against this package's server and client over libsodium. The
+  native half needs a host GHC and libsodium, which the action sets up.
+  cabal and Node are the job's. The wasm toolchain exports its own C
+  compiler, linker and archiver for every later step (CC, LD, AR and the
+  like), which a native build must not take: each native step unsets them.
+
+inputs:
+  backend:
+    description: Which build scripts/client.sh runs, wasm or js.
+    required: true
+  host-ghc:
+    description: The native GHC the test suite is built with.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: The client's test of itself, against serenity-kit's server
+      shell: bash
+      run: sh scripts/client.sh "${{ inputs.backend }}"
+
+    # The runner's image ships this GHC under ghcup, so this only makes it
+    # the default; it installs one if a later image does not.
+    - name: Install the host GHC
+      shell: bash
+      env:
+        HOST_GHC: ${{ inputs.host-ghc }}
+      run: |
+        if ! ghcup whereis ghc "$HOST_GHC" >/dev/null 2>&1; then
+          ghcup install ghc "$HOST_GHC"
+        fi
+        ghcup set ghc "$HOST_GHC"
+        ghc --version
+
+    - name: Cache libsodium
+      uses: actions/cache@v5
+      with:
+        path: .libsodium
+        key: ${{ runner.os }}-${{ runner.arch }}-libsodium-${{ hashFiles('scripts/libsodium.sh') }}
+
+    - name: Build libsodium
+      shell: bash
+      run: |
+        unset CC CXX LD AR NM RANLIB STRIP OBJCOPY OBJDUMP SIZE STRINGS
+        sh scripts/libsodium.sh install
+        sh scripts/libsodium.sh env >> "$GITHUB_ENV"
+
+    - name: Build the native test suite
+      shell: bash
+      run: |
+        unset CC CXX LD AR NM RANLIB STRIP OBJCOPY OBJDUMP SIZE STRINGS
+        cabal build opaque-test
+
+    - name: Test the compiled client against the native server and client
+      shell: bash
+      env:
+        OPAQUE_HS_CLIENT: sh scripts/client.sh ${{ inputs.backend }} serve
+      run: |
+        unset CC CXX LD AR NM RANLIB STRIP OBJCOPY OBJDUMP SIZE STRINGS
+        cabal test opaque-test --test-show-details=direct
+
+    # Without the client, or without Node and serenity-kit, the tests are
+    # pending. Here they must run.
+    - name: Check that no test was left out
+      shell: bash
+      run: |
+        log=$(find dist-newstyle/build -name 'opaque-hs-*-opaque-test.log' | head -n 1)
+        test -n "$log"
+        if grep -E 'skipped:|not run:' "$log"; then
+          echo "Tests that this job is for were left out." >&2
+          exit 1
+        fi

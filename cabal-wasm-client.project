@@ -4,7 +4,9 @@
 --
 --   . ~/.ghc-wasm/env
 --   npm ci
---   cabal --project-file=cabal-wasm-client.project --builddir=dist-newstyle/wasm-client build all
+--   cabal --project-file=cabal-wasm-client.project --builddir=dist-newstyle/wasm-client \
+--     --with-compiler="$(command -v wasm32-wasi-ghc-9.14.1.20260731)" \
+--     --with-hc-pkg="$(command -v wasm32-wasi-ghc-pkg-9.14.1.20260731)" build all
 --   sh scripts/client.sh wasm
 --
 -- The compiler is the one ghc-wasm-meta installs; CI pins the same.

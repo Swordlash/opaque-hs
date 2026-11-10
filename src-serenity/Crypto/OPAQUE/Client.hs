@@ -367,12 +367,13 @@ finalizeRegistration config (ClientRegState state) (RegistrationResponse respons
 -- library is loaded, so the call waits for nothing, and the same arguments
 -- give the same result.
 clientFinish :: Config -> ClientLoginState -> KE2 -> Identities -> Either Error (KE3, SessionKey, ExportKey)
-clientFinish config (ClientLoginState state) (KE2 ke2) ids = unsafePerformIO $
-  finish js_finish_login config state ke2 ids (3 * hashBytes) >>= \case
-    Left e -> pure (Left e)
-    Right results -> do
-      ke3 <- part 0 hashBytes results
-      sessionKey <- part hashBytes hashBytes results
-      exportKey <- part (2 * hashBytes) hashBytes results
-      wipe results
-      pure (Right (KE3 ke3, SessionKey sessionKey, ExportKey exportKey))
+clientFinish config (ClientLoginState state) (KE2 ke2) ids =
+  unsafePerformIO $
+    finish js_finish_login config state ke2 ids (3 * hashBytes) >>= \case
+      Left e -> pure (Left e)
+      Right results -> do
+        ke3 <- part 0 hashBytes results
+        sessionKey <- part hashBytes hashBytes results
+        exportKey <- part (2 * hashBytes) hashBytes results
+        wipe results
+        pure (Right (KE3 ke3, SessionKey sessionKey, ExportKey exportKey))

@@ -13,8 +13,12 @@
 # The program is built first, into the build directory this script looks
 # in:
 #
-#   cabal --project-file=cabal-wasm-client.project --builddir=dist-newstyle/wasm-client build all
-#   cabal --project-file=cabal-js-client.project --builddir=dist-newstyle/js-client build all
+#   cabal --project-file=cabal-wasm-client.project --builddir=dist-newstyle/wasm-client \
+#     --with-compiler="$(command -v wasm32-wasi-ghc-9.14.1.20260731)" \
+#     --with-hc-pkg="$(command -v wasm32-wasi-ghc-pkg-9.14.1.20260731)" build all
+#   cabal --project-file=cabal-js-client.project --builddir=dist-newstyle/js-client \
+#     --with-compiler="$(command -v javascript-unknown-ghcjs-ghc-9.12.2)" \
+#     --with-hc-pkg="$(command -v javascript-unknown-ghcjs-ghc-pkg-9.12.2)" build all
 #
 # Both need Node and the repository's node_modules (npm ci), for
 # @serenity-kit/opaque. The WebAssembly program also needs

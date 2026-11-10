@@ -31,5 +31,20 @@ The flag `wasm-libsodium`, off by default, builds the package for GHC's
 WebAssembly backend over a libsodium compiled for wasm32-wasi, which
 `scripts/libsodium.sh install-wasm` builds with the wasi-sdk. Without the
 flag the package is not buildable there. The test suite runs as a WASI
-module under `wasmtime`, all of it but the tests that drive Node. The
-package is not buildable for the JavaScript backend.
+module under `wasmtime`, all of it but the tests that drive Node.
+
+`Crypto.OPAQUE.Client` is the client's half alone (`registrationRequest`,
+`finalizeRegistration`, `clientStart`, `clientFinish`), with the same names
+and types on every backend. Natively, and with `wasm-libsodium`, it is the
+client of `Crypto.OPAQUE`. On GHC's WebAssembly backend without the flag,
+and on its JavaScript backend, where the package was not buildable, it
+calls `@serenity-kit/opaque` through haskell-halogen-jsbits, and is all of
+the package there. That client takes the empty context, Argon2id, and
+passwords and identities that are UTF-8, and answers `UnsupportedError`
+otherwise; it answers `ClientUnavailableError` where the library cannot be
+loaded. Both are new constructors of `Error`. `Crypto.OPAQUE.Types` holds
+what the two implementations share (`Config`, `Ksf`, `Identities`, `Error`,
+`Encoding`, `Scrub`), which `Crypto.OPAQUE` exports as before. The compiled
+client is tested under Node: by itself against serenity-kit's server, and
+by `opaque-test` against this package's server and its client over
+libsodium (`OPAQUE_HS_CLIENT`, `scripts/client.sh`).

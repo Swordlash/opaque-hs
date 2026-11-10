@@ -62,7 +62,7 @@ withCompiled act =
                 Left (e :: IOException) -> expectationFailure ("the compiled client did not start: " <> show e)
             _ -> expectationFailure "the compiled client did not start"
   where
-    skipped = pendingWith "skipped: OPAQUE_HS_CLIENT is not set (sh scripts/client.sh wasm serve, or js)"
+    skipped = pendingWith "not run: OPAQUE_HS_CLIENT is not set (sh scripts/client.sh wasm serve, or js)"
 
 -- | One command to the compiled client: the words of its answer, or the
 -- name of the 'Error' its step failed with.

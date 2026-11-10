@@ -3,7 +3,9 @@
 -- test program.
 --
 --   npm ci
---   cabal --project-file=cabal-js-client.project --builddir=dist-newstyle/js-client build all
+--   cabal --project-file=cabal-js-client.project --builddir=dist-newstyle/js-client \
+--     --with-compiler="$(command -v javascript-unknown-ghcjs-ghc-9.12.2)" \
+--     --with-hc-pkg="$(command -v javascript-unknown-ghcjs-ghc-pkg-9.12.2)" build all
 --   sh scripts/client.sh js
 --
 -- The compiler is ghcup's (its cross channel), installed under emsdk; the
