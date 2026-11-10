@@ -63,8 +63,9 @@
 --   the password and serenity-kit's own state as JavaScript strings, which
 --   are immutable: 'scrub' drops them, and the engine frees them when it
 --   will. A t'SessionKey' and an t'ExportKey' are bytes in the program's
---   heap, which 'scrub' zeroes; the strings serenity-kit returned them in
---   cannot be. In a browser any script on the page can read all of it.
+--   heap, which 'scrub' zeroes; the strings serenity-kit returned them in,
+--   and the text this module decoded them from, cannot be. In a browser any
+--   script on the page can read all of it.
 module Crypto.OPAQUE.Client
   ( -- * Configuration
     Config (..)
@@ -99,24 +100,33 @@ module Crypto.OPAQUE.Client
   )
 where
 
-import Control.Exception (evaluate)
 import Crypto.OPAQUE.Types
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Base64.URL qualified as Base64
 import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+import Data.Functor ((<&>))
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding (decodeLatin1, decodeUtf8', encodeUtf8)
 import Foreign.Marshal.Utils (fillBytes)
-import Halogen.JSBits (JSVal, Safety (..), browserJS, fromJSBytes, jsNull, toJSBytes)
+import Halogen.JSBits (JSText, JSVal, Safety (..), browserJS, fromJSText, toJSText)
 import Halogen.JSBits.Promise (Promise, waitCatch)
 import System.IO.Unsafe (unsafePerformIO)
+import Text.Read (readMaybe)
 
+-- The password and the identities cross as strings, and the messages and
+-- keys as strings of unpadded base64url, which is how serenity-kit takes
+-- and gives them. An identity is a flag and a string, since an empty
+-- identity is not the same as none.
 $( browserJS
      ["jsbits/opaque.js"]
-     [ ("js_start", "opaque_hs_start", Safe, [t|Bool -> JSVal -> IO (Promise JSVal)|])
+     [ ("js_start", "opaque_hs_start", Safe, [t|Bool -> JSText -> IO (Promise JSVal)|])
      , ("js_status", "opaque_hs_status", Unsafe, [t|JSVal -> IO Int|])
-     , ("js_message", "opaque_hs_message", Unsafe, [t|JSVal -> IO JSVal|])
+     , ("js_message", "opaque_hs_message", Unsafe, [t|JSVal -> IO JSText|])
      , ("js_forget", "opaque_hs_forget", Unsafe, [t|JSVal -> IO ()|])
-     , ("js_finish_login", "opaque_hs_finish_login", Safe, [t|JSVal -> JSVal -> Double -> Double -> JSVal -> JSVal -> IO JSVal|])
-     , ("js_finish_registration", "opaque_hs_finish_registration", Safe, [t|JSVal -> JSVal -> Double -> Double -> JSVal -> JSVal -> IO JSVal|])
+     , ("js_finish_login", "opaque_hs_finish_login", Safe, [t|JSVal -> JSText -> Double -> Double -> Bool -> JSText -> Bool -> JSText -> IO JSText|])
+     , ("js_finish_registration", "opaque_hs_finish_registration", Safe, [t|JSVal -> JSText -> Double -> Double -> Bool -> JSText -> Bool -> JSText -> IO JSText|])
      ]
  )
 
@@ -250,8 +260,7 @@ instance Scrub SessionKey where scrub (SessionKey k) = wipe k
 instance Scrub ExportKey where scrub (ExportKey k) = wipe k
 
 -- | Zero a 'ByteString' in place. Only for bytes this module made and gave
--- to nobody else: a key's own buffer, or a step's answer once its parts
--- are copied out.
+-- to nobody else: a key's own buffer.
 wipe :: ByteString -> IO ()
 wipe bs = unsafeUseAsCStringLen bs (\(p, n) -> fillBytes p 0 n)
 
@@ -262,8 +271,22 @@ errorOf = \case
   3 -> ReflectedValueError
   4 -> KsfError
   5 -> EnvelopeRecoveryError
-  6 -> UnsupportedError
   _ -> DeserializeError
+
+-- | Bytes as serenity-kit carries a message or a key: unpadded base64url.
+base64 :: ByteString -> JSText
+base64 = toJSText . decodeLatin1 . Base64.encodeUnpadded
+
+-- | The bytes of a word serenity-kit gave, when they have this length.
+unbase64 :: Int -> Text -> Either Error ByteString
+unbase64 size = either (const (Left DeserializeError)) (sized size) . Base64.decodeUnpadded . encodeUtf8
+
+-- | The text UTF-8 bytes spell, for serenity-kit, which takes a password
+-- and an identity as a JavaScript string and hashes its UTF-8 bytes. Bytes
+-- that are not UTF-8 have no such string. A byte order mark stays, as any
+-- other character.
+utf8 :: ByteString -> Either Error Text
+utf8 = either (const (Left UnsupportedError)) Right . decodeUtf8'
 
 -- | Start a login or a registration: the state, and the message of the
 -- given length.
@@ -271,15 +294,15 @@ start :: Bool -> Int -> ByteString -> IO (Either Error (JSVal, ByteString))
 start login size password
   -- RFC 9497, section 5.1: the OPRF's input is shorter than 2^16 - 1 bytes.
   | BS.length password >= 65535 = pure (Left InvalidInputError)
-  | otherwise =
-      (waitCatch =<< js_start login =<< toJSBytes password) >>= \case
-        Left _ -> pure (Left ClientUnavailableError)
-        Right started ->
-          js_status started >>= \case
-            0 -> do
-              message <- fromJSBytes =<< js_message started
-              pure ((started,) <$> sized size message)
-            status -> pure (Left (errorOf status))
+  | otherwise = case utf8 password of
+      Left e -> pure (Left e)
+      Right text ->
+        (waitCatch =<< js_start login (toJSText text)) >>= \case
+          Left _ -> pure (Left ClientUnavailableError)
+          Right started ->
+            js_status started >>= \case
+              0 -> fmap (started,) . unbase64 size . fromJSText <$> js_message started
+              status -> pure (Left (errorOf status))
 
 -- | The registration's first step, the RFC's CreateRegistrationRequest:
 -- blind the password. It gives the state to keep and the request to send.
@@ -313,48 +336,40 @@ stretching config
           kib = memLimit `div` 1024
           most = 4294967295
 
--- | A finishing step: the bytes of its results one after another, which the
--- caller copies its parts out of and then zeroes ('wipe').
+-- | A finishing step: the words of its results, each in base64url.
 finish
-  :: (JSVal -> JSVal -> Double -> Double -> JSVal -> JSVal -> IO JSVal)
+  :: (JSVal -> JSText -> Double -> Double -> Bool -> JSText -> Bool -> JSText -> IO JSText)
   -> Config
   -> JSVal
   -> ByteString
   -> Identities
-  -> Int
-  -> IO (Either Error ByteString)
-finish step config state message ids size = case stretching config of
+  -> IO (Either Error [Text])
+finish step config state message ids = case (,,) <$> stretching config <*> identity ids.client <*> identity ids.server of
   Left e -> pure (Left e)
-  Right (passes, kib)
-    -- An identity's length is written in two bytes.
-    | any ((>= 65536) . BS.length) ids.client || any ((>= 65536) . BS.length) ids.server -> pure (Left InvalidInputError)
-    | otherwise -> do
-        message' <- toJSBytes message
-        client <- maybe (pure jsNull) toJSBytes ids.client
-        server <- maybe (pure jsNull) toJSBytes ids.server
-        answer <- fromJSBytes =<< step state message' passes kib client server
-        case BS.uncons answer of
-          Just (0, results) | BS.length results == size -> pure (Right results)
-          Just (0, _) -> Left DeserializeError <$ wipe answer
-          Just (status, _) -> pure (Left (errorOf (fromIntegral status)))
-          Nothing -> pure (Left DeserializeError)
-
--- | A copy of @n@ bytes at an offset, made now, in a buffer of its own.
-part :: Int -> Int -> ByteString -> IO ByteString
-part offset n = evaluate . BS.copy . BS.take n . BS.drop offset
+  Right ((passes, kib), (hasClient, client), (hasServer, server)) -> do
+    answer <- fromJSText <$> step state (base64 message) passes kib hasClient client hasServer server
+    pure $ case T.words answer of
+      "ok" : results -> Right results
+      ["fail", status] -> Left (maybe DeserializeError errorOf (readMaybe (T.unpack status)))
+      _ -> Left DeserializeError
+  where
+    -- Whether there is an identity, and its text. Its length is written in
+    -- two bytes.
+    identity = \case
+      Nothing -> Right (False, toJSText T.empty)
+      Just bytes
+        | BS.length bytes >= 65536 -> Left InvalidInputError
+        | otherwise -> (True,) . toJSText <$> utf8 bytes
 
 -- | The registration's last step, the RFC's FinalizeRegistrationRequest:
 -- with the server's response, stretch the OPRF's output and make the
 -- record to send, which the server stores. It also gives the export key.
 finalizeRegistration :: Config -> ClientRegState -> RegistrationResponse -> Identities -> IO (Either Error (RegistrationRecord, ExportKey))
 finalizeRegistration config (ClientRegState state) (RegistrationResponse response) ids =
-  finish js_finish_registration config state response ids (recordBytes + hashBytes) >>= \case
-    Left e -> pure (Left e)
-    Right results -> do
-      record <- part 0 recordBytes results
-      exportKey <- part recordBytes hashBytes results
-      wipe results
-      pure (Right (RegistrationRecord record, ExportKey exportKey))
+  finish js_finish_registration config state response ids <&> \case
+    Right [record, exportKey] -> (,) <$> (RegistrationRecord <$> unbase64 recordBytes record) <*> (ExportKey <$> unbase64 hashBytes exportKey)
+    Right _ -> Left DeserializeError
+    Left e -> Left e
 
 -- | The login's last step, the RFC's GenerateKE3: with the server's KE2,
 -- recover the client's key from the envelope, check the server's MAC, and
@@ -369,11 +384,8 @@ finalizeRegistration config (ClientRegState state) (RegistrationResponse respons
 clientFinish :: Config -> ClientLoginState -> KE2 -> Identities -> Either Error (KE3, SessionKey, ExportKey)
 clientFinish config (ClientLoginState state) (KE2 ke2) ids =
   unsafePerformIO $
-    finish js_finish_login config state ke2 ids (3 * hashBytes) >>= \case
-      Left e -> pure (Left e)
-      Right results -> do
-        ke3 <- part 0 hashBytes results
-        sessionKey <- part hashBytes hashBytes results
-        exportKey <- part (2 * hashBytes) hashBytes results
-        wipe results
-        pure (Right (KE3 ke3, SessionKey sessionKey, ExportKey exportKey))
+    finish js_finish_login config state ke2 ids <&> \case
+      Right [ke3, sessionKey, exportKey] ->
+        (,,) <$> (KE3 <$> unbase64 hashBytes ke3) <*> (SessionKey <$> unbase64 hashBytes sessionKey) <*> (ExportKey <$> unbase64 hashBytes exportKey)
+      Right _ -> Left DeserializeError
+      Left e -> Left e

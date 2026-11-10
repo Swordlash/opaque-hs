@@ -231,7 +231,10 @@ cabal --project-file=cabal-wasm-client.project --builddir=dist-newstyle/wasm-cli
 (The compiler is named on the command line, by its path, as well as in
 the project file: with a native GHC on `PATH`, cabal may otherwise check
 that GHC's `ghc-pkg` against the cross compiler and refuse, with "Version
-mismatch between ghc and ghc-pkg".)
+mismatch between ghc and ghc-pkg". Where it refuses all the same, it has
+kept the wrong `ghc-pkg` in the build directory: delete
+`dist-newstyle/wasm-client/cache/compiler`, or `js-client`'s, and build
+again.)
 
 For the JavaScript backend, with ghcup's cross compiler, which is
 installed and used under [emsdk](https://github.com/emscripten-core/emsdk)

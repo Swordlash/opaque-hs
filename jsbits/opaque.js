@@ -20,14 +20,15 @@
 // Both are JavaScript strings, which cannot be zeroed; opaque_hs_forget
 // drops them.
 //
-// Bytes cross as Uint8Arrays. A finishing step answers one Uint8Array: a
-// status byte, and after a 0 the bytes of its results one after another.
-// The statuses are the numbers of errorOf in the Haskell module:
+// Everything crosses as serenity carries it: a password and an identity as
+// a string, and a message or a key as a string of unpadded base64url. The
+// Haskell module encodes and decodes them. A finishing step answers one
+// string: "ok" and its results, or "fail" and a status, with spaces
+// between. The statuses are the numbers of errorOf in the Haskell module:
 //
-//   0 done                 3 the server reflected the OPRF's value
-//   1 a message is invalid 4 the key stretching failed
-//   2 the state was dropped 5 a wrong password, or a wrong server
-//                          6 text that is not UTF-8
+//   1 a message is invalid    4 the key stretching failed
+//   2 the state was dropped   5 a wrong password, or a wrong server
+//   3 the server reflected the OPRF's value
 //
 // Keep this file ASCII: an embedded source is mis-escaped otherwise.
 
@@ -58,27 +59,6 @@ function opaque_hs_load() {
   return opaque_hs_loading;
 }
 
-// Unpadded base64url, as serenity carries every message, state and key.
-function opaque_hs_bytes(text) {
-  var binary = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
-  var bytes = new Uint8Array(binary.length);
-  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-function opaque_hs_base64(bytes) {
-  var binary = "";
-  for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-// The text UTF-8 bytes spell; throws when they are not UTF-8. A byte order
-// mark at the start stays, as any other character: serenity must hash the
-// bytes the caller gave.
-function opaque_hs_text(bytes) {
-  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-}
-
 // What serenity threw, as a status. A message that does not decode names
 // the step "deserialize ..."; the wasm module traps (a RuntimeError) when
 // Argon2id's memory cannot be allocated, and works again afterwards.
@@ -89,26 +69,18 @@ function opaque_hs_status_of(error) {
   return 1;
 }
 
-// Start a login (KE1) or a registration (the request) with the password's
-// UTF-8 bytes, which are zeroed here. A promise of { status, state,
-// password, message }; rejected when the library cannot be loaded.
+// Start a login (KE1) or a registration (the request) with the password.
+// A promise of { status, state, password, message }; rejected when the
+// library cannot be loaded.
 function opaque_hs_start(login, password) {
-  var text = null;
-  try {
-    text = opaque_hs_text(password);
-  } catch (error) {
-    text = null;
-  }
-  password.fill(0);
   return opaque_hs_load().then(function () {
-    if (text === null) return { status: 6 };
     try {
       if (login) {
-        var l = opaque_hs_module.client.startLogin({ password: text });
-        return { status: 0, state: l.clientLoginState, password: text, message: opaque_hs_bytes(l.startLoginRequest) };
+        var l = opaque_hs_module.client.startLogin({ password: password });
+        return { status: 0, state: l.clientLoginState, password: password, message: l.startLoginRequest };
       }
-      var r = opaque_hs_module.client.startRegistration({ password: text });
-      return { status: 0, state: r.clientRegistrationState, password: text, message: opaque_hs_bytes(r.registrationRequest) };
+      var r = opaque_hs_module.client.startRegistration({ password: password });
+      return { status: 0, state: r.clientRegistrationState, password: password, message: r.registrationRequest };
     } catch (error) {
       return { status: opaque_hs_status_of(error) };
     }
@@ -129,17 +101,12 @@ function opaque_hs_forget(state) {
 }
 
 // The arguments both finishing steps share, or a status. An identity is
-// null for none, or its UTF-8 bytes; empty bytes are the empty identity,
-// which is not none.
-function opaque_hs_arguments(state, iterations, kib, client, server) {
+// given or not, whatever its text: the empty identity is not none.
+function opaque_hs_arguments(state, iterations, kib, hasClient, client, hasServer, server) {
   if (opaque_hs_module === null || typeof state.state !== "string" || typeof state.password !== "string") return 2;
   var identifiers = {};
-  try {
-    if (client !== null) identifiers.client = opaque_hs_text(client);
-    if (server !== null) identifiers.server = opaque_hs_text(server);
-  } catch (error) {
-    return 6;
-  }
+  if (hasClient) identifiers.client = client;
+  if (hasServer) identifiers.server = server;
   return {
     password: state.password,
     keyStretching: { "argon2id-custom": { iterations: iterations, memory: kib, parallelism: 1 } },
@@ -147,49 +114,34 @@ function opaque_hs_arguments(state, iterations, kib, client, server) {
   };
 }
 
-// A status of 0 and the bytes of each base64url word after it.
-function opaque_hs_answer(words) {
-  var parts = words.map(opaque_hs_bytes);
-  var length = 1;
-  for (var i = 0; i < parts.length; i++) length += parts[i].length;
-  var answer = new Uint8Array(length);
-  var at = 1;
-  for (var j = 0; j < parts.length; j++) {
-    answer.set(parts[j], at);
-    at += parts[j].length;
-    parts[j].fill(0);
-  }
-  return answer;
-}
-
 // Finish a login with KE2: KE3, the session key and the export key.
-function opaque_hs_finish_login(state, ke2, iterations, kib, client, server) {
+function opaque_hs_finish_login(state, ke2, iterations, kib, hasClient, client, hasServer, server) {
   try {
-    var given = opaque_hs_arguments(state, iterations, kib, client, server);
-    if (typeof given === "number") return Uint8Array.of(given);
+    var given = opaque_hs_arguments(state, iterations, kib, hasClient, client, hasServer, server);
+    if (typeof given === "number") return "fail " + given;
     given.clientLoginState = state.state;
-    given.loginResponse = opaque_hs_base64(ke2);
+    given.loginResponse = ke2;
     var r = opaque_hs_module.client.finishLogin(given);
     // serenity does not say which: a wrong password, a wrong MAC of the
     // server's, or the OPRF's value reflected.
-    if (r === undefined) return Uint8Array.of(5);
-    return opaque_hs_answer([r.finishLoginRequest, r.sessionKey, r.exportKey]);
+    if (r === undefined) return "fail 5";
+    return "ok " + r.finishLoginRequest + " " + r.sessionKey + " " + r.exportKey;
   } catch (error) {
-    return Uint8Array.of(opaque_hs_status_of(error));
+    return "fail " + opaque_hs_status_of(error);
   }
 }
 
 // Finish a registration with the server's response: the record and the
 // export key.
-function opaque_hs_finish_registration(state, response, iterations, kib, client, server) {
+function opaque_hs_finish_registration(state, response, iterations, kib, hasClient, client, hasServer, server) {
   try {
-    var given = opaque_hs_arguments(state, iterations, kib, client, server);
-    if (typeof given === "number") return Uint8Array.of(given);
+    var given = opaque_hs_arguments(state, iterations, kib, hasClient, client, hasServer, server);
+    if (typeof given === "number") return "fail " + given;
     given.clientRegistrationState = state.state;
-    given.registrationResponse = opaque_hs_base64(response);
+    given.registrationResponse = response;
     var r = opaque_hs_module.client.finishRegistration(given);
-    return opaque_hs_answer([r.registrationRecord, r.exportKey]);
+    return "ok " + r.registrationRecord + " " + r.exportKey;
   } catch (error) {
-    return Uint8Array.of(opaque_hs_status_of(error));
+    return "fail " + opaque_hs_status_of(error);
   }
 }

@@ -111,7 +111,9 @@ library
   if arch(javascript) || (arch(wasm32) && !flag(wasm-libsodium))
     hs-source-dirs: src-serenity
     build-depends:
-        haskell-halogen-jsbits >= 0.1 && < 0.2
+        base64-bytestring >= 1.2 && < 1.3,
+        haskell-halogen-jsbits >= 0.1 && < 0.2,
+        text >= 2.0 && < 2.2
     if arch(javascript)
       js-sources: jsbits/opaque.js
   else
