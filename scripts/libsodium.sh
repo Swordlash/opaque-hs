@@ -103,7 +103,9 @@ installed() {
   [ "$(cat "$prefix/.built" 2>/dev/null || true)" = "$mark" ] &&
     [ -f "$prefix/lib/libsodium.a" ] &&
     [ -f "$prefix/include/sodium.h" ] &&
-    { [ "$target" = wasm ] || [ -f "$prefix/lib/libsodium-static.a" ]; }
+    { [ "$target" = wasm ] || {
+      [ -f "$prefix/lib/libsodium-static.a" ] && [ -f "$prefix/lib/pkgconfig/libsodium.pc" ]
+    }; }
 }
 
 fetch() {
